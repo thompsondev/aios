@@ -515,6 +515,15 @@
       .msg-text p:last-of-type {
         margin-bottom: 0;
       }
+      .msg-text img,
+      .msg-email-body img {
+        max-width: min(100%, 320px);
+        height: auto;
+        display: block;
+        margin: 0.75em 0;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+      }
       .msg-text h1,
       .msg-text h2,
       .msg-text h3,
@@ -1574,12 +1583,43 @@
     </div>
 
     <script>
+      function escapeHtmlAttr(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;')
+          .replace(/"/g, '&quot;')
+          .replace(/</g, '&lt;');
+      }
+
       const _linkRenderer = new marked.Renderer();
       _linkRenderer.link = function ({ href, title, text }) {
-        const t = title ? ` title="${title}"` : '';
-        return `<a href="${href}"${t} target="_blank" rel="noopener noreferrer">${text}</a>`;
+        const t = title ? ` title="${escapeHtmlAttr(title)}"` : '';
+        return `<a href="${escapeHtmlAttr(href)}"${t} target="_blank" rel="noopener noreferrer">${text}</a>`;
+      };
+      _linkRenderer.image = function ({ href, title, text }) {
+        const alt = escapeHtmlAttr(text || '');
+        const t = title ? ` title="${escapeHtmlAttr(title)}"` : '';
+        if (!href || !/^https:\/\//i.test(String(href).trim())) {
+          const safeHref = escapeHtmlAttr(href || '');
+          return `<p><em>Image omitted — need a direct <code>https://</code> image URL.</em> ${safeHref ? `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">Link</a>` : ''}</p>`;
+        }
+        const src = escapeHtmlAttr(href);
+        return `<img src="${src}" alt="${alt}"${t} loading="lazy" decoding="async" referrerpolicy="no-referrer" />`;
       };
       marked.use({ renderer: _linkRenderer, breaks: true, gfm: true });
+
+      const MARKDOWN_PURIFY = { ADD_ATTR: ['target', 'loading', 'decoding', 'referrerpolicy'] };
+      try {
+        DOMPurify.addHook('uponSanitizeAttribute', function (node, data) {
+          if (node.nodeName === 'IMG' && data.attrName === 'src') {
+            var v = data.attrValue && String(data.attrValue).trim();
+            if (!v || !/^https:\/\//i.test(v)) data.keepAttr = false;
+          }
+        });
+      } catch (_) {}
+
+      function sanitizeMarkdownHtml(html) {
+        return DOMPurify.sanitize(html, MARKDOWN_PURIFY);
+      }
 
       // ── Conversation history (in-memory for the current session) ───
       var conversationHistory = [];
@@ -1800,7 +1840,7 @@
             badge.textContent = '● AIOS';
             const textEl = document.createElement('div');
             textEl.className = 'msg-text';
-            textEl.innerHTML = DOMPurify.sanitize(marked.parse(msg.content || ''), { ADD_ATTR: ['target'] });
+            textEl.innerHTML = sanitizeMarkdownHtml(marked.parse(msg.content || ''));
             row.appendChild(badge);
             row.appendChild(textEl);
             chatInner.appendChild(row);
@@ -2336,7 +2376,7 @@
           /\[([^\]\n]+)\]/g,
           '<span class="msg-email-placeholder">[$1]</span>'
         );
-        bodyEl.innerHTML = DOMPurify.sanitize(marked.parse(highlighted), { ADD_ATTR: ['target'] });
+        bodyEl.innerHTML = sanitizeMarkdownHtml(marked.parse(highlighted));
         card.appendChild(bodyEl);
 
         row.appendChild(card);
@@ -2528,7 +2568,7 @@
               }
               text += evt.v || '';
               // DOMPurify + marked: output is sanitized before DOM insertion
-              textEl.innerHTML = DOMPurify.sanitize(marked.parse(text), { ADD_ATTR: ['target'] });
+              textEl.innerHTML = sanitizeMarkdownHtml(marked.parse(text));
               scrollToBottom();
             } else if (evt.t === 'error') {
               streamError = true;

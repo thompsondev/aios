@@ -48,8 +48,15 @@ export class ChatController {
       properties: { prompt: { type: 'string' } },
     },
   })
-  async generateResponse(@Body() body: { prompt: string }) {
-    return this.chatService.generateResponse(body.prompt);
+  async generateResponse(
+    @Body() body: { prompt: string },
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.chatService.generateResponseWithProvider(
+      body.prompt,
+    );
+    res.setHeader('x-ai-provider', result.provider);
+    return result.text;
   }
 
   @Post('prompt/claude')
@@ -109,6 +116,8 @@ export class ChatController {
     },
     @Res({ passthrough: false }) res: Response,
   ): Promise<void> {
+    const preferredProvider = this.chatService.getPreferredProvider();
+    res.setHeader('x-ai-provider', preferredProvider);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');

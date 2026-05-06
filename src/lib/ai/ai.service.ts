@@ -9,7 +9,10 @@ import { createDbTool } from './tools/db.tool';
 import { createMediaTool } from './tools/media.tool';
 import { webSearch } from '@valyu/ai-sdk';
 import { PrismaService } from '../prisma/prisma.service';
-import { ClaudeAiService } from '../claude-ai/claude-ai.service';
+import {
+  ClaudeAiService,
+  summarizeClaudeHttpError,
+} from '../claude-ai/claude-ai.service';
 
 const DEFAULT_AI_MODEL = 'openai/gpt-4o';
 
@@ -25,6 +28,8 @@ export type ChatMessage = {
   content: string;
   attachments?: Attachment[];
 };
+
+export type AiProvider = 'claude' | 'gateway';
 
 @Injectable()
 export class AiService {
@@ -147,13 +152,13 @@ export class AiService {
     });
   }
 
-  async generateClaudeResponseWithHistory(
-    messages: ChatMessage[],
-  ): Promise<string> {
-    if (!this.claudeAiService.isConfigured()) {
-      throw new Error('Claude fallback is not configured');
-    }
-
+  private buildClaudeRequestParams(messages: ChatMessage[]): {
+    prompt: string;
+    system: string;
+    messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    maxTokens: number;
+    temperature: number;
+  } {
     const history = messages.slice(0, -1).map((m) => ({
       role: m.role,
       content: m.content,
@@ -166,10 +171,29 @@ export class AiService {
       throw new Error('No user message found for Claude request');
     }
 
-    return this.claudeAiService.generateText({
+    return {
       prompt: lastUserMessage.content,
       system: SYSTEM_PROMPT,
       messages: this.buildClaudeMessages(history),
+      maxTokens: 8192,
+      temperature: 0.2,
+    };
+  }
+
+  async generateClaudeResponseWithHistory(
+    messages: ChatMessage[],
+  ): Promise<string> {
+    if (!this.claudeAiService.isConfigured()) {
+      throw new Error('Claude fallback is not configured');
+    }
+
+    const p = this.buildClaudeRequestParams(messages);
+    return this.claudeAiService.generateText({
+      prompt: p.prompt,
+      system: p.system,
+      messages: p.messages,
+      maxTokens: p.maxTokens,
+      temperature: p.temperature,
     });
   }
 
@@ -179,35 +203,157 @@ export class AiService {
     ]);
   }
 
+  async generateResponseWithHistoryAndProvider(
+    messages: ChatMessage[],
+  ): Promise<{
+    text: string;
+    provider: AiProvider;
+  }> {
+    // Primary: Anthropic Messages API. Fallback: AI Gateway (OpenAI-compatible models + tools).
+    if (this.claudeAiService.isConfigured()) {
+      try {
+        this.logger.log(
+          `[chat] Primary: Claude (${this.claudeAiService.getModel()})`,
+        );
+        const text = await this.generateClaudeResponseWithHistory(messages);
+        if (text?.trim()) {
+          return { text, provider: 'claude' };
+        }
+        this.logger.warn(
+          '[chat] Claude returned empty output; falling back to AI Gateway',
+        );
+      } catch (claudeError: unknown) {
+        this.logger.error(
+          `[chat] Claude failed; fallback to AI Gateway: ${summarizeClaudeHttpError(claudeError)}`,
+        );
+      }
+    } else {
+      this.logger.log('[chat] Claude not configured; using AI Gateway only');
+    }
+
+    const model = this.getModel();
+    this.logger.log(`[chat] AI Gateway model: ${model}`);
+    const result = await generateText({
+      model: this.gateway(model),
+      system: SYSTEM_PROMPT,
+      messages: this.buildSdkMessages(messages),
+      tools: this.getTools(),
+      stopWhen: stepCountIs(5),
+    });
+    return { text: result.text, provider: 'gateway' };
+  }
+
   async generateResponseWithHistory(messages: ChatMessage[]): Promise<string> {
     try {
-      const model = this.getModel();
-      this.logger.log(`Using model: ${model}`);
-
-      const result = await generateText({
-        model: this.gateway(model),
-        system: SYSTEM_PROMPT,
-        messages: this.buildSdkMessages(messages),
-        tools: this.getTools(),
-        stopWhen: stepCountIs(5),
-      });
-
-      return result.text;
+      const { text } =
+        await this.generateResponseWithHistoryAndProvider(messages);
+      return text;
     } catch (error: unknown) {
-      this.logger.error('AI Gateway error', error);
-      if (this.claudeAiService.isConfigured()) {
-        this.logger.warn('Falling back to Claude for text generation');
-        return this.generateClaudeResponseWithHistory(messages);
-      }
+      this.logger.error('AI text generation error', error);
       throw error;
     }
   }
 
+  private async *streamGateway(messages: ChatMessage[]): AsyncIterable<any> {
+    const model = this.getModel();
+    const gatewayResult = streamText({
+      model: this.gateway(model),
+      system: SYSTEM_PROMPT,
+      messages: this.buildSdkMessages(messages),
+      tools: this.getTools(),
+      stopWhen: stepCountIs(5),
+    });
+    for await (const part of gatewayResult.fullStream) {
+      yield part;
+    }
+  }
+
+  /**
+   * Streaming chat: try Claude first (Anthropic native web_search / web_fetch when enabled in Console + env).
+   * On failure or empty body, stream from AI Gateway (Valyu webSearch + tools).
+   */
+  private async *streamClaudeFirst(
+    messages: ChatMessage[],
+    actualProviderRef: { current: AiProvider },
+  ): AsyncIterable<any> {
+    try {
+      this.logger.log(
+        `[chat stream] Primary: Claude (${this.claudeAiService.getModel()})`,
+      );
+      if (this.claudeAiService.isStreamingEnabled()) {
+        const params = this.buildClaudeRequestParams(messages);
+        let sawText = false;
+        for await (const part of this.claudeAiService.streamGenerateText({
+          prompt: params.prompt,
+          system: params.system,
+          messages: params.messages,
+          maxTokens: params.maxTokens,
+          temperature: params.temperature,
+        })) {
+          if (part.type === 'text-delta' && part.text) {
+            sawText = true;
+          }
+          yield part;
+        }
+        if (sawText) {
+          actualProviderRef.current = 'claude';
+          yield { type: 'finish', finishReason: 'stop' };
+          return;
+        }
+        this.logger.warn(
+          '[chat stream] Claude stream produced no text; falling back to AI Gateway',
+        );
+      } else {
+        const surfaceNativeWebUi = this.claudeAiService.shouldSurfaceWebToolUi();
+        if (surfaceNativeWebUi) {
+          yield { type: 'tool-call', toolName: 'webSearch' };
+        }
+        const text = await this.generateClaudeResponseWithHistory(messages);
+        if (surfaceNativeWebUi) {
+          yield { type: 'tool-result', toolName: 'webSearch' };
+        }
+        if (text?.trim()) {
+          actualProviderRef.current = 'claude';
+          yield { type: 'text-delta', text };
+          yield { type: 'finish', finishReason: 'stop' };
+          return;
+        }
+        this.logger.warn(
+          '[chat stream] Claude returned empty output; falling back to AI Gateway',
+        );
+      }
+    } catch (claudeError: unknown) {
+      this.logger.error(
+        `[chat stream] Claude failed; fallback to AI Gateway: ${summarizeClaudeHttpError(claudeError)}`,
+      );
+    }
+
+    actualProviderRef.current = 'gateway';
+    const model = this.getModel();
+    this.logger.log(`[chat stream] AI Gateway model: ${model}`);
+    yield* this.streamGateway(messages);
+  }
+
   streamResponseWithHistory(messages: ChatMessage[]): {
     fullStream: AsyncIterable<any>;
+    /** Preferred provider when Claude key exists (for headers); see actualProviderRef for what served the reply. */
+    provider: AiProvider;
+    actualProviderRef: { current: AiProvider };
   } {
+    const actualProviderRef: { current: AiProvider } = { current: 'gateway' };
+
+    if (this.claudeAiService.isConfigured()) {
+      actualProviderRef.current = 'claude';
+      return {
+        fullStream: this.streamClaudeFirst(messages, actualProviderRef),
+        provider: 'claude',
+        actualProviderRef,
+      };
+    }
+
+    this.logger.log('[chat stream] Claude not configured; using AI Gateway only');
     const model = this.getModel();
-    this.logger.log(`Using model: ${model}`);
+    this.logger.log(`[chat stream] AI Gateway model: ${model}`);
 
     const result = streamText({
       model: this.gateway(model),
@@ -217,6 +363,10 @@ export class AiService {
       stopWhen: stepCountIs(5),
     });
 
-    return { fullStream: result.fullStream };
+    return {
+      fullStream: result.fullStream,
+      provider: 'gateway',
+      actualProviderRef,
+    };
   }
 }

@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AiService, ChatMessage, Attachment } from '../../lib/ai/ai.service';
+import {
+  AiService,
+  ChatMessage,
+  Attachment,
+  AiProvider,
+} from '../../lib/ai/ai.service';
 import { WhatsappService } from '../../lib/whatsapp/wa.service';
 import { RedisService } from '../../lib/redis/redis.service';
 import { SlackService } from '../../lib/slack/slack.service';
@@ -60,10 +65,22 @@ export class ChatService {
     return this.aiService.generateResponse(prompt);
   }
 
+  async generateResponseWithProvider(
+    prompt: string,
+  ): Promise<{ text: string; provider: AiProvider }> {
+    return this.aiService.generateResponseWithHistoryAndProvider([
+      { role: 'user', content: prompt },
+    ]);
+  }
+
   async generateClaudeResponse(prompt: string): Promise<string> {
     return this.aiService.generateClaudeResponseWithHistory([
       { role: 'user', content: prompt },
     ]);
+  }
+
+  getPreferredProvider(): AiProvider {
+    return this.aiService.isClaudeConfigured() ? 'claude' : 'gateway';
   }
 
   async handleStreamPrompt(
@@ -71,7 +88,7 @@ export class ChatService {
     emit: (data: object) => void,
     history?: ChatMessage[],
     attachments?: Attachment[],
-  ): Promise<void> {
+  ): Promise<AiProvider> {
     const userMessage: ChatMessage = { role: 'user', content: prompt };
     if (attachments?.length) userMessage.attachments = attachments;
 
@@ -79,7 +96,8 @@ export class ChatService {
       ...(history ?? []).slice(-HISTORY_LIMIT),
       userMessage,
     ];
-    const { fullStream } = this.aiService.streamResponseWithHistory(messages);
+    const { fullStream, actualProviderRef } =
+      this.aiService.streamResponseWithHistory(messages);
 
     let textDeltaCount = 0;
     try {
@@ -106,10 +124,10 @@ export class ChatService {
             break;
           case 'finish':
             this.logger.log(
-              `Stream finished — text deltas: ${textDeltaCount}, reason: ${part.finishReason}`,
+              `Stream finished — served by ${actualProviderRef.current}, text deltas: ${textDeltaCount}, reason: ${part.finishReason}`,
             );
             emit({ t: 'done' });
-            break;
+            return actualProviderRef.current;
           case 'error':
             this.logger.error(
               `Stream error event: ${JSON.stringify(part.error)}`,
@@ -138,7 +156,7 @@ export class ChatService {
           if (fallbackText.trim()) {
             emit({ t: 'text', v: fallbackText });
             emit({ t: 'done' });
-            return;
+            return 'claude';
           }
         } catch (fallbackErr: unknown) {
           this.logger.error(
@@ -156,7 +174,10 @@ export class ChatService {
           : null) ??
         'Stream error';
       emit({ t: 'error', msg });
+      return actualProviderRef.current;
     }
+
+    return actualProviderRef.current;
   }
 
   verifyWebhook(mode: string, token: string, challenge: string): string | null {
