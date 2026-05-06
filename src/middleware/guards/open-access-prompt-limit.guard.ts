@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
-import * as moment from 'moment-timezone';
+import moment from 'moment-timezone';
 
 const WINDOW_TZ = 'Africa/Lagos';
 const DEFAULT_PROMPTS_PER_DAY_WHEN_DOMAIN_CHAT_SET = 5;
@@ -38,7 +38,11 @@ export class OpenAccessPromptLimitGuard implements CanActivate {
     }
 
     const request = context.switchToHttp().getRequest<Request>();
-    const ip = (request.ip || request.socket?.remoteAddress || 'unknown').trim();
+    const ip = (
+      request.ip ||
+      request.socket?.remoteAddress ||
+      'unknown'
+    ).trim();
     const host = (request.get('Host') || '').split(':')[0].toLowerCase();
     if (!domainChatSet.has(host)) {
       return true;

@@ -14,7 +14,10 @@ export class AppController {
   }
 
   @Get('branding')
-  getBranding(@Req() req: Request): { authorName: string | null; authorUrl: string | null } {
+  getBranding(@Req() req: Request): {
+    authorName: string | null;
+    authorUrl: string | null;
+  } {
     const host = req.get('Host');
     return this.appService.getBranding(host ?? undefined);
   }

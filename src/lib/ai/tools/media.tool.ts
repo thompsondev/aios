@@ -88,17 +88,23 @@ export function createMediaTool(
           signal: AbortSignal.timeout(30_000),
         });
       } catch (err: any) {
-        return { error: `Could not fetch URL: ${err?.message ?? 'network error'}` };
+        return {
+          error: `Could not fetch URL: ${err?.message ?? 'network error'}`,
+        };
       }
 
       if (!response.ok) {
-        return { error: `URL responded with ${response.status} ${response.statusText}` };
+        return {
+          error: `URL responded with ${response.status} ${response.statusText}`,
+        };
       }
 
       // ── 2. Resolve MIME type ──────────────────────────────────────────────
       const contentType = response.headers.get('content-type') ?? '';
       const mimeType =
-        contentType.split(';')[0].trim() || mimeFromUrl(url) || 'application/octet-stream';
+        contentType.split(';')[0].trim() ||
+        mimeFromUrl(url) ||
+        'application/octet-stream';
 
       const analysisPrompt =
         prompt ??
@@ -118,7 +124,9 @@ export function createMediaTool(
           mimeType,
           url,
           content: text.slice(0, 8_000),
-          ...(truncated && { note: `Content truncated to 8 000 chars (full size: ${text.length})` }),
+          ...(truncated && {
+            note: `Content truncated to 8 000 chars (full size: ${text.length})`,
+          }),
         };
       }
 
@@ -139,7 +147,11 @@ export function createMediaTool(
       // Note: ai v6 ImagePart uses `mimeType`, FilePart uses `mediaType`
       const mediaPart = IMAGE_TYPES.has(mimeType)
         ? ({ type: 'image' as const, image: bytes, mimeType } as const)
-        : ({ type: 'file' as const, data: bytes, mediaType: mimeType } as const);
+        : ({
+            type: 'file' as const,
+            data: bytes,
+            mediaType: mimeType,
+          } as const);
 
       // ── 7. Analyse via vision/document model ──────────────────────────────
       try {

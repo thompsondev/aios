@@ -16,8 +16,18 @@ import { Request, Response } from 'express';
 import { ChatService } from './chat.service';
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { OpenAccessPromptLimitGuard } from '../../middleware/guards/open-access-prompt-limit.guard';
-import { SlackService } from 'src/lib/slack/slack.service';
-import { Public } from 'src/middleware/decorators/public.decorator';
+import { SlackService } from '../../lib/slack/slack.service';
+import { Public } from '../../middleware/decorators/public.decorator';
+
+type StreamHistoryItem = { role: 'user' | 'assistant'; content: string };
+type StreamAttachment = { name: string; mimeType: string; data: string };
+
+type SlackEventBody = {
+  type?: string;
+  challenge?: string;
+};
+
+type SlackRequestWithRawBody = Request & { rawBody?: string };
 
 @ApiTags('Chat')
 @Controller('chat')
@@ -40,6 +50,19 @@ export class ChatController {
   })
   async generateResponse(@Body() body: { prompt: string }) {
     return this.chatService.generateResponse(body.prompt);
+  }
+
+  @Post('prompt/claude')
+  @UseGuards(OpenAccessPromptLimitGuard)
+  @ApiOperation({ summary: 'Generate a response directly from Claude' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { prompt: { type: 'string' } },
+    },
+  })
+  async generateClaudeResponse(@Body() body: { prompt: string }) {
+    return this.chatService.generateClaudeResponse(body.prompt);
   }
 
   @Post('prompt/stream')
@@ -81,12 +104,8 @@ export class ChatController {
     @Body()
     body: {
       prompt: string;
-      history?: Array<{ role: 'user' | 'assistant'; content: string }>;
-      attachments?: Array<{
-        name: string;
-        mimeType: string;
-        data: string;
-      }>;
+      history?: StreamHistoryItem[];
+      attachments?: StreamAttachment[];
     },
     @Res({ passthrough: false }) res: Response,
   ): Promise<void> {
@@ -121,8 +140,10 @@ export class ChatController {
   @Post('webhook')
   @HttpCode(200)
   @ApiOperation({ summary: 'Handle incoming WhatsApp messages' })
-  async handleWebhook(@Body() body: any) {
-    await this.chatService.handleIncomingMessage(body);
+  async handleWebhook(@Body() body: unknown) {
+    await this.chatService.handleIncomingMessage(
+      body as Parameters<ChatService['handleIncomingMessage']>[0],
+    );
     return 'OK';
   }
 
@@ -166,18 +187,17 @@ export class ChatController {
   @ApiOperation({ summary: 'Slack Event API webhook' })
   async handleSlackEvents(
     @Req() req: Request,
-    @Headers('x-slack-signature') signature: string,
-    @Headers('x-slack-request-timestamp') timestamp: string,
-    @Body() body: any,
+    @Headers('x-slack-signature') signature: string | undefined,
+    @Headers('x-slack-request-timestamp') timestamp: string | undefined,
+    @Body() body: SlackEventBody,
   ) {
-    const rawBody: string | undefined = (req as any).rawBody;
+    const rawBody = (req as SlackRequestWithRawBody).rawBody;
 
     if (rawBody !== undefined) {
-      const isValid = this.slackService.verifyRequest(
-        signature,
-        timestamp,
-        rawBody,
-      );
+      const isValid =
+        typeof signature === 'string' &&
+        typeof timestamp === 'string' &&
+        this.slackService.verifyRequest(signature, timestamp, rawBody);
       if (!isValid) {
         this.logger.warn('Rejected Slack request — invalid signature');
         throw new UnauthorizedException('Invalid Slack signature');
@@ -185,13 +205,18 @@ export class ChatController {
     }
 
     if (body.type === 'url_verification') {
+      if (!body.challenge) {
+        throw new UnauthorizedException('Missing Slack challenge token');
+      }
       return this.chatService.handleSlackChallenge(body.challenge);
     }
 
     if (body.type === 'event_callback') {
       this.chatService
         .handleSlackEvent(body)
-        .catch((err) => this.logger.error('Error handling Slack event', err));
+        .catch((err: unknown) =>
+          this.logger.error('Error handling Slack event', String(err)),
+        );
     }
 
     return { ok: true };

@@ -1,12 +1,49 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AiService, ChatMessage, Attachment } from 'src/lib/ai/ai.service';
-import { WhatsappService } from 'src/lib/whatsapp/wa.service';
-import { RedisService } from 'src/lib/redis/redis.service';
-import { SlackService } from 'src/lib/slack/slack.service';
+import { AiService, ChatMessage, Attachment } from '../../lib/ai/ai.service';
+import { WhatsappService } from '../../lib/whatsapp/wa.service';
+import { RedisService } from '../../lib/redis/redis.service';
+import { SlackService } from '../../lib/slack/slack.service';
 
 const HISTORY_LIMIT = 20;
 const HISTORY_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 const SLACK_EVENT_DEDUP_TTL = 300; // 5 minutes
+
+type WhatsAppMessage = {
+  type?: string;
+  from?: string;
+  id?: string;
+  text?: {
+    body?: string;
+  };
+};
+
+type WhatsAppWebhookBody = {
+  entry?: Array<{
+    changes?: Array<{
+      value?: {
+        messages?: WhatsAppMessage[];
+      };
+    }>;
+  }>;
+};
+
+type SlackEvent = {
+  type?: string;
+  bot_id?: string;
+  subtype?: string;
+  text?: string;
+  channel?: string;
+  thread_ts?: string;
+  ts?: string;
+  user?: string;
+};
+
+type SlackEventBody = {
+  type?: string;
+  challenge?: string;
+  event_id?: string;
+  event?: SlackEvent;
+};
 
 @Injectable()
 export class ChatService {
@@ -21,6 +58,12 @@ export class ChatService {
 
   async generateResponse(prompt: string): Promise<string> {
     return this.aiService.generateResponse(prompt);
+  }
+
+  async generateClaudeResponse(prompt: string): Promise<string> {
+    return this.aiService.generateClaudeResponseWithHistory([
+      { role: 'user', content: prompt },
+    ]);
   }
 
   async handleStreamPrompt(
@@ -79,15 +122,39 @@ export class ChatService {
           'Stream finished with no text from the model. Check AI_GATEWAY_API_KEY and model.',
         );
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const normalized = err as {
+        message?: string;
+        stack?: string;
+        cause?: { message?: string; responseBody?: unknown };
+      };
+      this.logger.error('Stream error', normalized.stack ?? String(err));
+
+      // Fallback for streaming failures: return a complete Claude response as one final text chunk.
+      if (this.aiService.isClaudeConfigured()) {
+        try {
+          const fallbackText =
+            await this.aiService.generateClaudeResponseWithHistory(messages);
+          if (fallbackText.trim()) {
+            emit({ t: 'text', v: fallbackText });
+            emit({ t: 'done' });
+            return;
+          }
+        } catch (fallbackErr: unknown) {
+          this.logger.error(
+            'Claude stream fallback failed',
+            String(fallbackErr),
+          );
+        }
+      }
+
       const msg =
-        err?.message ??
-        err?.cause?.message ??
-        (typeof err?.cause?.responseBody === 'string'
-          ? err.cause.responseBody
+        normalized.message ??
+        normalized.cause?.message ??
+        (typeof normalized.cause?.responseBody === 'string'
+          ? normalized.cause.responseBody
           : null) ??
         'Stream error';
-      this.logger.error('Stream error', err?.stack ?? err);
       emit({ t: 'error', msg });
     }
   }
@@ -103,16 +170,17 @@ export class ChatService {
     return null;
   }
 
-  async handleIncomingMessage(body: any): Promise<void> {
+  async handleIncomingMessage(body: WhatsAppWebhookBody): Promise<void> {
     const { messages } = body?.entry?.[0]?.changes?.[0]?.value ?? {};
     if (!messages) return;
 
     const message = messages[0];
     if (message.type !== 'text') return;
 
-    const phoneNumber: string = message.from;
-    const messageID: string = message.id;
-    const userText: string = message.text.body;
+    const phoneNumber = message.from?.trim();
+    const messageID = message.id?.trim();
+    const userText = message.text?.body?.trim();
+    if (!phoneNumber || !messageID || !userText) return;
 
     // Mark as read + show typing indicator
     await this.whatsappService.sendReadWithTyping(messageID);
@@ -147,7 +215,7 @@ export class ChatService {
     return { challenge };
   }
 
-  async handleSlackEvent(body: any): Promise<void> {
+  async handleSlackEvent(body: SlackEventBody): Promise<void> {
     const event = body.event;
 
     if (!event) {
@@ -161,11 +229,13 @@ export class ChatService {
       return;
     }
     if (event.type !== 'app_mention' && event.type !== 'message') {
-      this.logger.debug(`[Slack] Ignoring unsupported event type: ${event.type}`);
+      this.logger.debug(
+        `[Slack] Ignoring unsupported event type: ${event.type}`,
+      );
       return;
     }
 
-    const eventId: string = body.event_id;
+    const eventId = body.event_id?.trim();
     if (eventId) {
       const dedupKey = `slack:event:${eventId}`;
       const seen = await this.redisService.get(dedupKey);
@@ -176,18 +246,22 @@ export class ChatService {
       await this.redisService.set(dedupKey, '1', SLACK_EVENT_DEDUP_TTL);
     }
 
-    const userText: string = (event.text ?? '')
-      .replace(/<@[A-Z0-9]+>/g, '')
-      .trim();
+    const userText = (event.text ?? '').replace(/<@[A-Z0-9]+>/g, '').trim();
 
     if (!userText) {
-      this.logger.debug('[Slack] Empty user text after stripping mentions, skipping');
+      this.logger.debug(
+        '[Slack] Empty user text after stripping mentions, skipping',
+      );
       return;
     }
 
-    const channel: string = event.channel;
-    const threadTs: string = event.thread_ts ?? event.ts;
-    const userId: string = event.user;
+    const channel = event.channel?.trim();
+    const threadTs = (event.thread_ts ?? event.ts ?? '').trim();
+    const userId = event.user?.trim();
+    if (!channel || !threadTs || !userId) {
+      this.logger.warn('[Slack] Missing channel/thread/user in event payload');
+      return;
+    }
 
     this.logger.log(`[Slack] ${userId} in ${channel}: "${userText}"`);
 

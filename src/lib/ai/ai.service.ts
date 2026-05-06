@@ -9,6 +9,7 @@ import { createDbTool } from './tools/db.tool';
 import { createMediaTool } from './tools/media.tool';
 import { webSearch } from '@valyu/ai-sdk';
 import { PrismaService } from '../prisma/prisma.service';
+import { ClaudeAiService } from '../claude-ai/claude-ai.service';
 
 const DEFAULT_AI_MODEL = 'openai/gpt-4o';
 
@@ -34,6 +35,7 @@ export class AiService {
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly claudeAiService: ClaudeAiService,
   ) {
     this.gateway = createGateway({
       apiKey: this.configService.get<string>('AI_GATEWAY_API_KEY'),
@@ -60,6 +62,10 @@ export class AiService {
 
   isWebSearchEnabled(): boolean {
     return !!this.configService.get<string>('VALYU_API_KEY');
+  }
+
+  isClaudeConfigured(): boolean {
+    return this.claudeAiService.isConfigured();
   }
 
   /** Searches the web and returns formatted context, or null if not configured / failed. */
@@ -126,6 +132,47 @@ export class AiService {
     });
   }
 
+  private buildClaudeMessages(messages: ChatMessage[]): Array<{
+    role: 'user' | 'assistant';
+    content: string;
+  }> {
+    return messages.map((msg) => {
+      if (msg.role === 'user' && msg.attachments?.length) {
+        return {
+          role: 'user',
+          content: `${msg.content}\n\n[User attached ${msg.attachments.length} file(s). Claude fallback currently handles text only.]`,
+        };
+      }
+      return { role: msg.role, content: msg.content };
+    });
+  }
+
+  async generateClaudeResponseWithHistory(
+    messages: ChatMessage[],
+  ): Promise<string> {
+    if (!this.claudeAiService.isConfigured()) {
+      throw new Error('Claude fallback is not configured');
+    }
+
+    const history = messages.slice(0, -1).map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+    const lastUserMessage = [...messages]
+      .reverse()
+      .find((m) => m.role === 'user');
+
+    if (!lastUserMessage) {
+      throw new Error('No user message found for Claude request');
+    }
+
+    return this.claudeAiService.generateText({
+      prompt: lastUserMessage.content,
+      system: SYSTEM_PROMPT,
+      messages: this.buildClaudeMessages(history),
+    });
+  }
+
   async generateResponse(userPrompt: string): Promise<string> {
     return this.generateResponseWithHistory([
       { role: 'user', content: userPrompt },
@@ -146,8 +193,12 @@ export class AiService {
       });
 
       return result.text;
-    } catch (error) {
+    } catch (error: unknown) {
       this.logger.error('AI Gateway error', error);
+      if (this.claudeAiService.isConfigured()) {
+        this.logger.warn('Falling back to Claude for text generation');
+        return this.generateClaudeResponseWithHistory(messages);
+      }
       throw error;
     }
   }

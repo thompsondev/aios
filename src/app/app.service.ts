@@ -19,7 +19,10 @@ export class AppService {
     return 'Hello World!';
   }
 
-  getBranding(requestHost?: string): { authorName: string | null; authorUrl: string | null } {
+  getBranding(requestHost?: string): {
+    authorName: string | null;
+    authorUrl: string | null;
+  } {
     const authorName = this.configService.get<string>('AUTHOR_NAME') ?? null;
     const authorUrl = this.configService.get<string>('AUTHOR_URL') ?? null;
     const platformUrl = this.configService.get<string>('PLATFORM_URL');
