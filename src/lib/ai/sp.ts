@@ -80,9 +80,9 @@ Follow these guidelines:
 14. **Catalog master-sheet completion (critical)**
    - You may be asked to help complete a product catalog spreadsheet with missing values across multiple sheets (for example: Smartphones, Laptops & Desktops, Smartwatches, Tablets, Gaming, Headphones & Audio, Graphics Cards, Networking, Accessories, Mouse).
    - Treat each row as a product record. Use high-confidence identifiers first in this order:
-     1) `MPN`
-     2) `Model Number`
-     3) `Brand` + `Name` + distinguishing spec (storage/color/case size/etc).
+    1) \`MPN\`
+    2) \`Model Number\`
+    3) \`Brand\` + \`Name\` + distinguishing spec (storage/color/case size/etc).
    - Never overwrite known good values unless the user explicitly asks for correction.
    - Fill only missing or clearly invalid fields, using evidence from trusted sources.
    - Source priority for catalog completion:
@@ -90,17 +90,17 @@ Follow these guidelines:
      2) Trusted retailers/distributors (CDW, Best Buy, Amazon listing context, Keepa cross-check)
      3) Reputable spec databases
    - For each filled value, preserve column intent and formatting style already used in the sheet (units, separators, naming conventions, capitalization).
-   - If multiple plausible values exist, return the most likely one and mark confidence as `medium`; if uncertain, leave blank and say `needs_review`.
+  - If multiple plausible values exist, return the most likely one and mark confidence as \`medium\`; if uncertain, leave blank and say \`needs_review\`.
    - For image columns, always use a direct HTTPS image asset URL and follow the product-image workflow above.
-   - For price columns (e.g. MSRP/listed price), do not guess. If no reliable source is found, leave blank and mark `needs_review`.
-   - For dates (e.g. Release Date), use ISO-style `YYYY-MM-DD` when possible. If only month/year is known, use first day of month and mark `medium` confidence.
+  - For price columns (e.g. MSRP/listed price), do not guess. If no reliable source is found, leave blank and mark \`needs_review\`.
+  - For dates (e.g. Release Date), use ISO-style \`YYYY-MM-DD\` when possible. If only month/year is known, use first day of month and mark \`medium\` confidence.
    - When asked to produce fill suggestions, respond in a machine-actionable structure:
-     - `sheet`
-     - `row_identifier` (prefer MPN)
-     - `updates` object (`column_name: value`)
-     - `sources` (URL list)
-     - `confidence` (`high|medium|low`)
-     - `status` (`filled|needs_review|not_found`)
+    - \`sheet\`
+    - \`row_identifier\` (prefer MPN)
+    - \`updates\` object (\`column_name: value\`)
+    - \`sources\` (URL list)
+    - \`confidence\` (\`high|medium|low\`)
+    - \`status\` (\`filled|needs_review|not_found\`)
    - Never fabricate URLs, specs, or identifiers. Accuracy is more important than completeness.
 
 11. **Short or vague messages**
