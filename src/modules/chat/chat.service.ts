@@ -50,6 +50,8 @@ type SlackEventBody = {
   event?: SlackEvent;
 };
 
+type NetworkStatus = 'ok' | 'degraded' | 'offline';
+
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
@@ -60,6 +62,47 @@ export class ChatService {
     private readonly redisService: RedisService,
     private readonly slackService: SlackService,
   ) {}
+
+  private isSearchToolName(toolName: string | undefined): boolean {
+    return (
+      toolName === 'webSearch' ||
+      toolName === 'claude:web_search' ||
+      toolName === 'claude:web_fetch'
+    );
+  }
+
+  private isConnectivityFailureMessage(msg: string): boolean {
+    const m = msg.toLowerCase();
+    return (
+      m.includes('no internet connection') ||
+      m.includes('dns resolution failed') ||
+      m.includes('network connection issue') ||
+      m.includes('connection timeout') ||
+      m.includes('internet connection dropped')
+    );
+  }
+
+  private getNetworkStatusFromMessage(msg: string): NetworkStatus {
+    const m = msg.toLowerCase();
+    if (
+      m.includes('no internet connection') ||
+      m.includes('dns resolution failed') ||
+      m.includes('enotfound') ||
+      m.includes('getaddrinfo')
+    ) {
+      return 'offline';
+    }
+    if (
+      m.includes('network connection issue') ||
+      m.includes('connection timeout') ||
+      m.includes('internet connection dropped') ||
+      m.includes('socket hang up') ||
+      m.includes('timed out')
+    ) {
+      return 'degraded';
+    }
+    return 'ok';
+  }
 
   async generateResponse(prompt: string): Promise<string> {
     return this.aiService.generateResponse(prompt);
@@ -109,13 +152,13 @@ export class ChatService {
             break;
           case 'tool-call':
             this.logger.log(`Tool call: ${part.toolName}`);
-            if (part.toolName === 'webSearch') {
+            if (this.isSearchToolName(part.toolName)) {
               emit({ t: 'searching' });
             }
             break;
           case 'tool-result':
             this.logger.log(`Tool result: ${part.toolName}`);
-            if (part.toolName === 'webSearch') {
+            if (this.isSearchToolName(part.toolName)) {
               emit({ t: 'search_done' });
             }
             break;
@@ -132,7 +175,17 @@ export class ChatService {
             this.logger.error(
               `Stream error event: ${JSON.stringify(part.error)}`,
             );
-            break;
+            {
+              const emitted =
+                (part as { error?: { message?: string } }).error?.message ??
+                'Stream error';
+              const networkStatus = this.getNetworkStatusFromMessage(emitted);
+              if (networkStatus !== 'ok') {
+                emit({ t: 'network_status', v: networkStatus });
+              }
+              emit({ t: 'error', msg: emitted });
+              return actualProviderRef.current;
+            }
         }
       }
       if (textDeltaCount === 0) {
@@ -140,6 +193,7 @@ export class ChatService {
           'Stream finished with no text from the model. Check AI_GATEWAY_API_KEY and model.',
         );
       }
+      emit({ t: 'network_status', v: 'ok' });
     } catch (err: unknown) {
       const normalized = err as {
         message?: string;
@@ -147,14 +201,25 @@ export class ChatService {
         cause?: { message?: string; responseBody?: unknown };
       };
       this.logger.error('Stream error', normalized.stack ?? String(err));
+      const precomputedMsg =
+        normalized.message ??
+        normalized.cause?.message ??
+        (typeof normalized.cause?.responseBody === 'string'
+          ? normalized.cause.responseBody
+          : null) ??
+        'Stream error';
 
       // Fallback for streaming failures: return a complete Claude response as one final text chunk.
-      if (this.aiService.isClaudeConfigured()) {
+      if (
+        this.aiService.isClaudeConfigured() &&
+        !this.isConnectivityFailureMessage(precomputedMsg)
+      ) {
         try {
           const fallbackText =
             await this.aiService.generateClaudeResponseWithHistory(messages);
           if (fallbackText.trim()) {
             emit({ t: 'text', v: fallbackText });
+            emit({ t: 'network_status', v: 'ok' });
             emit({ t: 'done' });
             return 'claude';
           }
@@ -166,14 +231,11 @@ export class ChatService {
         }
       }
 
-      const msg =
-        normalized.message ??
-        normalized.cause?.message ??
-        (typeof normalized.cause?.responseBody === 'string'
-          ? normalized.cause.responseBody
-          : null) ??
-        'Stream error';
-      emit({ t: 'error', msg });
+      const networkStatus = this.getNetworkStatusFromMessage(precomputedMsg);
+      if (networkStatus !== 'ok') {
+        emit({ t: 'network_status', v: networkStatus });
+      }
+      emit({ t: 'error', msg: precomputedMsg });
       return actualProviderRef.current;
     }
 

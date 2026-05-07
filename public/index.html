@@ -1734,6 +1734,8 @@
         thinking: { cls: 's-thinking', label: 'THINKING' },
         searching: { cls: 's-searching', label: 'SEARCHING' },
         streaming: { cls: 's-streaming', label: 'REPLYING' },
+        degraded: { cls: 's-error', label: 'DEGRADED NET' },
+        offline: { cls: 's-error', label: 'OFFLINE' },
         done: { cls: 's-done', label: 'DONE' },
         error: { cls: 's-error', label: 'ERROR' },
       };
@@ -2548,6 +2550,7 @@
           let text = '';
           let textEl = null;
           let streamError = false;
+          let latestNetworkStatus = 'ok';
 
           const handleEvt = (evt) => {
             if (evt.t === 'searching') {
@@ -2573,7 +2576,20 @@
             } else if (evt.t === 'error') {
               streamError = true;
               aiMsg.showError(evt.msg || 'Stream error from server.');
-              setStatus('error');
+              if (latestNetworkStatus === 'offline') {
+                setStatus('offline');
+              } else if (latestNetworkStatus === 'degraded') {
+                setStatus('degraded');
+              } else {
+                setStatus('error');
+              }
+            } else if (evt.t === 'network_status') {
+              latestNetworkStatus = evt.v || 'ok';
+              if (latestNetworkStatus === 'offline') {
+                setStatus('offline');
+              } else if (latestNetworkStatus === 'degraded') {
+                setStatus('degraded');
+              }
             }
           };
 

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 
 import { generateText, streamText, stepCountIs } from 'ai';
 import { createGateway } from '@ai-sdk/gateway';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 import { systemPrompt as SYSTEM_PROMPT } from './sp';
 import { createDbTool } from './tools/db.tool';
@@ -36,23 +37,85 @@ export class AiService {
   private readonly logger = new Logger(AiService.name);
 
   private readonly gateway;
+  private readonly gatewayModel;
+  private readonly gatewayConnectTimeoutMs: number;
+  private readonly gatewayStreamRetryCount: number;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly claudeAiService: ClaudeAiService,
   ) {
+    this.gatewayConnectTimeoutMs = this.parsePositiveInt(
+      this.configService.get<string>('AI_GATEWAY_CONNECT_TIMEOUT_MS'),
+      30_000,
+    );
+    this.gatewayStreamRetryCount = this.parsePositiveInt(
+      this.configService.get<string>('AI_GATEWAY_STREAM_RETRIES'),
+      2,
+    );
+    const gatewayAgent = new Agent({
+      connectTimeout: this.gatewayConnectTimeoutMs,
+      keepAliveTimeout: 30_000,
+      keepAliveMaxTimeout: 120_000,
+    });
     this.gateway = createGateway({
       apiKey: this.configService.get<string>('AI_GATEWAY_API_KEY'),
+      fetch: (input, init) =>
+        undiciFetch(input as any, {
+          ...(init ?? {}),
+          dispatcher: gatewayAgent,
+        } as any),
     });
+    this.gatewayModel = this.gateway(this.getModel());
     this.logger.log(`AI model activated: ${this.getModel()}`);
+    this.logger.log(
+      `AI Gateway connect timeout: ${this.gatewayConnectTimeoutMs}ms`,
+    );
+  }
+
+  private parsePositiveInt(raw: string | undefined, fallback: number): number {
+    if (!raw) return fallback;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  }
+
+  private isConnectivityIssueMessage(msg: string): boolean {
+    const m = msg.toLowerCase();
+    return (
+      m.includes('enotfound') ||
+      m.includes('getaddrinfo') ||
+      m.includes('eai_again') ||
+      m.includes('und_err_connect_timeout') ||
+      m.includes('connect timeout') ||
+      m.includes('request timed out') ||
+      m.includes('socket hang up') ||
+      m.includes('network error')
+    );
+  }
+
+  private connectivityErrorMessageFrom(msg: string): string {
+    const m = msg.toLowerCase();
+    if (m.includes('enotfound') || m.includes('getaddrinfo')) {
+      return 'No internet connection or DNS resolution failed. Please check your network and try again.';
+    }
+    if (
+      m.includes('connect timeout') ||
+      m.includes('request timed out') ||
+      m.includes('und_err_connect_timeout')
+    ) {
+      return 'Internet connection is unstable/slow right now (connection timeout). Please retry in a moment.';
+    }
+    if (m.includes('socket hang up')) {
+      return 'Internet connection dropped while contacting AI providers. Please retry.';
+    }
+    return 'Network connection issue while contacting AI providers. Please check internet and retry.';
   }
 
   private getTools() {
-    const model = this.gateway(this.getModel());
     const tools: Record<string, any> = {
       database: createDbTool(this.prisma),
-      media: createMediaTool(model),
+      media: createMediaTool(this.gatewayModel),
     };
     if (this.isWebSearchEnabled()) {
       tools.webSearch = webSearch({ maxNumResults: 5, fastMode: true });
@@ -234,7 +297,7 @@ export class AiService {
     const model = this.getModel();
     this.logger.log(`[chat] AI Gateway model: ${model}`);
     const result = await generateText({
-      model: this.gateway(model),
+      model: this.gatewayModel,
       system: SYSTEM_PROMPT,
       messages: this.buildSdkMessages(messages),
       tools: this.getTools(),
@@ -256,15 +319,35 @@ export class AiService {
 
   private async *streamGateway(messages: ChatMessage[]): AsyncIterable<any> {
     const model = this.getModel();
-    const gatewayResult = streamText({
-      model: this.gateway(model),
-      system: SYSTEM_PROMPT,
-      messages: this.buildSdkMessages(messages),
-      tools: this.getTools(),
-      stopWhen: stepCountIs(5),
-    });
-    for await (const part of gatewayResult.fullStream) {
-      yield part;
+    for (let attempt = 1; attempt <= this.gatewayStreamRetryCount; attempt++) {
+      try {
+        if (attempt > 1) {
+          this.logger.warn(
+            `[chat stream] Retrying AI Gateway stream (${attempt}/${this.gatewayStreamRetryCount})`,
+          );
+        }
+        const gatewayResult = streamText({
+          model: this.gatewayModel,
+          system: SYSTEM_PROMPT,
+          messages: this.buildSdkMessages(messages),
+          tools: this.getTools(),
+          stopWhen: stepCountIs(5),
+        });
+        for await (const part of gatewayResult.fullStream) {
+          yield part;
+        }
+        return;
+      } catch (err: unknown) {
+        const msg = String((err as any)?.message ?? err);
+        const connectivityLike = this.isConnectivityIssueMessage(msg);
+        if (!connectivityLike || attempt >= this.gatewayStreamRetryCount) {
+          if (connectivityLike) {
+            throw new Error(this.connectivityErrorMessageFrom(msg));
+          }
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+      }
     }
   }
 
@@ -282,6 +365,15 @@ export class AiService {
       );
       if (this.claudeAiService.isStreamingEnabled()) {
         const params = this.buildClaudeRequestParams(messages);
+        if (this.claudeAiService.shouldForceValidatedImageResponse(params.prompt)) {
+          const text = await this.generateClaudeResponseWithHistory(messages);
+          if (text?.trim()) {
+            actualProviderRef.current = 'claude';
+            yield { type: 'text-delta', text };
+            yield { type: 'finish', finishReason: 'stop' };
+            return;
+          }
+        }
         let sawText = false;
         for await (const part of this.claudeAiService.streamGenerateText({
           prompt: params.prompt,
@@ -356,7 +448,7 @@ export class AiService {
     this.logger.log(`[chat stream] AI Gateway model: ${model}`);
 
     const result = streamText({
-      model: this.gateway(model),
+      model: this.gatewayModel,
       system: SYSTEM_PROMPT,
       messages: this.buildSdkMessages(messages),
       tools: this.getTools(),
