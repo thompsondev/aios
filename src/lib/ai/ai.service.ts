@@ -3,7 +3,6 @@ import { ConfigService } from '@nestjs/config';
 
 import { generateText, streamText, stepCountIs } from 'ai';
 import { createGateway } from '@ai-sdk/gateway';
-import { Agent, fetch as undiciFetch } from 'undici';
 
 import { systemPrompt as SYSTEM_PROMPT } from './sp';
 import { createDbTool } from './tools/db.tool';
@@ -54,18 +53,8 @@ export class AiService {
       this.configService.get<string>('AI_GATEWAY_STREAM_RETRIES'),
       2,
     );
-    const gatewayAgent = new Agent({
-      connectTimeout: this.gatewayConnectTimeoutMs,
-      keepAliveTimeout: 30_000,
-      keepAliveMaxTimeout: 120_000,
-    });
     this.gateway = createGateway({
       apiKey: this.configService.get<string>('AI_GATEWAY_API_KEY'),
-      fetch: (input, init) =>
-        undiciFetch(input as any, {
-          ...(init ?? {}),
-          dispatcher: gatewayAgent,
-        } as any),
     });
     this.gatewayModel = this.gateway(this.getModel());
     this.logger.log(`AI model activated: ${this.getModel()}`);
