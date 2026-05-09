@@ -5,6 +5,7 @@ import { WhatsappModule } from './whatsapp/wa.module';
 import { RedisModule } from './redis/redis.module';
 import { SlackModule } from './slack/slack.module';
 import { ClaudeAiModule } from './claude-ai/claude-ai.module';
+import { EnrichmentModule } from './enrichment/enrichment.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { ClaudeAiModule } from './claude-ai/claude-ai.module';
     RedisModule,
     SlackModule,
     ClaudeAiModule,
+    EnrichmentModule,
   ],
 })
 export class LibModule {}

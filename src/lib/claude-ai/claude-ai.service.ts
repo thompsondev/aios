@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
+import { ClaudeDbToolService } from './claude-db-tool.service';
 
 type ClaudeMessage = {
   role: 'user' | 'assistant';
@@ -18,6 +19,12 @@ type ClaudeGenerateTextParams = {
   maxTokens?: number;
   temperature?: number;
   messages?: ClaudeMessage[];
+  /** When false, no web_search / web_fetch tools (saves tokens; use for enrichment). Default true. */
+  enableServerTools?: boolean;
+  /** When true, skip post-hoc image URL validation (extra calls). Use for non-chat JSON tasks. */
+  skipImagePostValidation?: boolean;
+  /** When false, omit Prisma database_read/database_write tools. Default true if tools are enabled in env. */
+  enableDatabaseTools?: boolean;
 };
 
 /** Parts compatible with AI SDK stream shape used in ChatService. */
@@ -46,6 +53,41 @@ export function summarizeClaudeHttpError(error: unknown): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isClaudeRateLimitError(error: unknown): boolean {
+  const e = error as {
+    status?: number;
+    type?: string;
+    error?: { type?: string; error?: { type?: string } };
+  };
+  if (e.status === 429) return true;
+  if (e.type === 'rate_limit_error') return true;
+  const inner = e.error?.error?.type ?? (e.error as { type?: string } | undefined)?.type;
+  return inner === 'rate_limit_error';
+}
+
+/** Wait time from Anthropic headers, or a conservative default. */
+function getClaudeRateLimitWaitMs(error: unknown): number {
+  const e = error as { headers?: Headers };
+  const h = e.headers;
+  if (h && typeof h.get === 'function') {
+    const reset = h.get('anthropic-ratelimit-input-tokens-reset');
+    if (reset) {
+      const ms = Date.parse(reset) - Date.now();
+      if (Number.isFinite(ms) && ms > 0) {
+        return Math.min(ms + 1_000, 180_000);
+      }
+    }
+    const ra = h.get('retry-after');
+    if (ra) {
+      const sec = Number.parseInt(ra, 10);
+      if (Number.isFinite(sec) && sec > 0) {
+        return Math.min(sec * 1_000 + 500, 120_000);
+      }
+    }
+  }
+  return 15_000;
 }
 
 function isTransientClaudeNetworkError(error: unknown): boolean {
@@ -94,6 +136,34 @@ function extractTextFromContentBlocks(content: unknown): string {
     if (b.type === 'text' && typeof b.text === 'string') out.push(b.text);
   }
   return out.join('');
+}
+
+function extractToolUseBlocks(
+  content: unknown,
+): Array<{ id: string; name: string; input: Record<string, unknown> }> {
+  if (!Array.isArray(content)) return [];
+  const out: Array<{ id: string; name: string; input: Record<string, unknown> }> =
+    [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    const b = block as {
+      type?: string;
+      id?: string;
+      name?: string;
+      input?: unknown;
+    };
+    if (b.type === 'tool_use' && b.id && b.name) {
+      out.push({
+        id: b.id,
+        name: b.name,
+        input:
+          b.input && typeof b.input === 'object' && !Array.isArray(b.input)
+            ? (b.input as Record<string, unknown>)
+            : {},
+      });
+    }
+  }
+  return out;
 }
 
 function extractCandidateImageUrls(text: string): string[] {
@@ -154,8 +224,12 @@ export class ClaudeAiService {
   private static readonly REQUEST_TIMEOUT_MS = 600_000;
   private static readonly MAX_ATTEMPTS = 3;
   private static readonly MAX_PAUSE_TURN_ROUNDS = 16;
+  private static readonly MAX_TOOL_AND_PAUSE_STEPS = 32;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly dbToolService?: ClaudeDbToolService,
+  ) {
     this.client = new Anthropic({
       apiKey: this.configService.get<string>('CLAUDE_API_KEY') ?? undefined,
       timeout: ClaudeAiService.REQUEST_TIMEOUT_MS,
@@ -318,6 +392,34 @@ export class ClaudeAiService {
     return tools.length ? tools : undefined;
   }
 
+  private composeTools(
+    useServerTools: boolean,
+    enableDatabaseTools: boolean,
+  ): Array<Record<string, unknown>> | undefined {
+    const out: Array<Record<string, unknown>> = [];
+    if (enableDatabaseTools && this.dbToolService?.isEnabled()) {
+      out.push(...this.dbToolService.getAnthropicToolDefinitions());
+    }
+    if (useServerTools) {
+      const st = this.buildServerTools();
+      if (st?.length) out.push(...st);
+    }
+    return out.length ? out : undefined;
+  }
+
+  private async runClientTool(
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<string> {
+    if (!this.dbToolService?.isEnabled()) {
+      return JSON.stringify({
+        ok: false,
+        error: 'Database tools are not enabled (CLAUDE_DB_TOOLS_ENABLED)',
+      });
+    }
+    return this.dbToolService.executeTool(name, input);
+  }
+
   private toConversation(params: ClaudeGenerateTextParams): ApiMessage[] {
     const historyMessages: ApiMessage[] = (params.messages ?? []).map((m) => ({
       role: m.role,
@@ -331,14 +433,16 @@ export class ClaudeAiService {
       throw new Error('CLAUDE_API_KEY is not configured');
     }
 
-    let useServerTools = true;
+    let useServerTools = params.enableServerTools !== false;
+    const enableDatabaseTools = params.enableDatabaseTools !== false;
     const conversation = this.toConversation(params);
 
     for (let toolRetry = 0; toolRetry < 2; toolRetry++) {
-      const tools = useServerTools ? this.buildServerTools() : undefined;
-      const max_tokens = tools
-        ? Math.max(params.maxTokens ?? 1024, 4096)
-        : (params.maxTokens ?? 1024);
+      const tools = this.composeTools(useServerTools, enableDatabaseTools);
+      const max_tokens =
+        tools && tools.length > 0
+          ? Math.max(params.maxTokens ?? 1024, 4096)
+          : (params.maxTokens ?? 1024);
 
       for (
         let attempt = 1;
@@ -354,6 +458,9 @@ export class ClaudeAiService {
             tools,
             messages: conversation,
           });
+          if (params.skipImagePostValidation) {
+            return text;
+          }
           if (!this.isImageUrlValidationEnabled()) {
             return text;
           }
@@ -420,6 +527,17 @@ export class ClaudeAiService {
           }
 
           const summary = summarizeClaudeHttpError(error);
+          if (
+            isClaudeRateLimitError(error) &&
+            attempt < ClaudeAiService.MAX_ATTEMPTS
+          ) {
+            const waitMs = getClaudeRateLimitWaitMs(error);
+            this.logger.warn(
+              `Claude rate limited; waiting ${waitMs}ms before retry ${attempt + 1}/${ClaudeAiService.MAX_ATTEMPTS}`,
+            );
+            await delay(waitMs);
+            continue;
+          }
           const retriable =
             attempt < ClaudeAiService.MAX_ATTEMPTS &&
             isTransientClaudeNetworkError(error);
@@ -447,14 +565,16 @@ export class ClaudeAiService {
       throw new Error('CLAUDE_API_KEY is not configured');
     }
 
-    let useServerTools = true;
+    let useServerTools = params.enableServerTools !== false;
+    const enableDatabaseTools = params.enableDatabaseTools !== false;
     const initialConversation = this.toConversation(params);
 
     for (let toolRetry = 0; toolRetry < 2; toolRetry++) {
-      const tools = useServerTools ? this.buildServerTools() : undefined;
-      const max_tokens = tools
-        ? Math.max(params.maxTokens ?? 1024, 4096)
-        : (params.maxTokens ?? 1024);
+      const tools = this.composeTools(useServerTools, enableDatabaseTools);
+      const max_tokens =
+        tools && tools.length > 0
+          ? Math.max(params.maxTokens ?? 1024, 4096)
+          : (params.maxTokens ?? 1024);
 
       for (
         let attempt = 1;
@@ -495,6 +615,11 @@ export class ClaudeAiService {
                   } else if (name === 'web_fetch') {
                     yield { type: 'tool-call', toolName: 'claude:web_fetch' };
                   }
+                } else if (block?.type === 'tool_use') {
+                  const name = block.name as string;
+                  if (name) {
+                    yield { type: 'tool-call', toolName: name };
+                  }
                 }
                 if (block?.type === 'web_search_tool_result') {
                   yield { type: 'tool-result', toolName: 'claude:web_search' };
@@ -505,6 +630,27 @@ export class ClaudeAiService {
             }
 
             const message = await stream.finalMessage();
+
+            if (message.stop_reason === 'tool_use') {
+              const toolUses = extractToolUseBlocks(message.content);
+              const resultBlocks: unknown[] = [];
+              for (const tu of toolUses) {
+                const payload = await this.runClientTool(tu.name, tu.input);
+                resultBlocks.push({
+                  type: 'tool_result',
+                  tool_use_id: tu.id,
+                  content: payload,
+                });
+                yield { type: 'tool-result', toolName: tu.name };
+              }
+              conversation = [
+                ...conversation,
+                { role: 'assistant', content: message.content as unknown[] },
+                { role: 'user', content: resultBlocks },
+              ];
+              continue;
+            }
+
             if (message.stop_reason !== 'pause_turn') {
               return;
             }
@@ -536,6 +682,17 @@ export class ClaudeAiService {
           }
 
           const summary = summarizeClaudeHttpError(error);
+          if (
+            isClaudeRateLimitError(error) &&
+            attempt < ClaudeAiService.MAX_ATTEMPTS
+          ) {
+            const waitMs = getClaudeRateLimitWaitMs(error);
+            this.logger.warn(
+              `Claude streaming rate limited; waiting ${waitMs}ms before retry ${attempt + 1}/${ClaudeAiService.MAX_ATTEMPTS}`,
+            );
+            await delay(waitMs);
+            continue;
+          }
           const retriable =
             attempt < ClaudeAiService.MAX_ATTEMPTS &&
             isTransientClaudeNetworkError(error);
@@ -563,11 +720,7 @@ export class ClaudeAiService {
     let conversation = params.messages;
     let lastText = '';
 
-    for (
-      let round = 0;
-      round < ClaudeAiService.MAX_PAUSE_TURN_ROUNDS;
-      round++
-    ) {
+    for (let step = 0; step < ClaudeAiService.MAX_TOOL_AND_PAUSE_STEPS; step++) {
       const message = await this.client.messages.create({
         model: params.model,
         system: params.system,
@@ -576,6 +729,28 @@ export class ClaudeAiService {
         tools: params.tools as any,
         messages: conversation as any,
       });
+
+      if (message.stop_reason === 'tool_use') {
+        const toolUses = extractToolUseBlocks(message.content);
+        const resultBlocks: unknown[] = [];
+        for (const tu of toolUses) {
+          const payload = await this.runClientTool(tu.name, tu.input);
+          resultBlocks.push({
+            type: 'tool_result',
+            tool_use_id: tu.id,
+            content: payload,
+          });
+        }
+        conversation = [
+          ...conversation,
+          { role: 'assistant', content: message.content as unknown[] },
+          { role: 'user', content: resultBlocks },
+        ];
+        this.logger.debug(
+          `Claude tool_use round; continuing (${step + 1}/${ClaudeAiService.MAX_TOOL_AND_PAUSE_STEPS})`,
+        );
+        continue;
+      }
 
       lastText = extractTextFromContentBlocks(message.content);
       if (message.stop_reason !== 'pause_turn') {
@@ -587,12 +762,12 @@ export class ClaudeAiService {
         { role: 'assistant', content: message.content as unknown[] },
       ];
       this.logger.debug(
-        `Claude pause_turn continuation round ${round + 1}/${ClaudeAiService.MAX_PAUSE_TURN_ROUNDS}`,
+        `Claude pause_turn continuation step ${step + 1}/${ClaudeAiService.MAX_TOOL_AND_PAUSE_STEPS}`,
       );
     }
 
     this.logger.warn(
-      'Claude stop_reason still pause_turn after max rounds; returning partial text',
+      'Claude stop_reason still pause_turn or tool loop after max steps; returning partial text',
     );
     return lastText;
   }

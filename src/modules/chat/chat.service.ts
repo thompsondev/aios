@@ -123,7 +123,7 @@ export class ChatService {
   }
 
   getPreferredProvider(): AiProvider {
-    return this.aiService.isClaudeConfigured() ? 'claude' : 'gateway';
+    return 'claude';
   }
 
   async handleStreamPrompt(
@@ -190,7 +190,7 @@ export class ChatService {
       }
       if (textDeltaCount === 0) {
         this.logger.warn(
-          'Stream finished with no text from the model. Check AI_GATEWAY_API_KEY and model.',
+          'Stream finished with no text from the model. Check CLAUDE_API_KEY and Claude connectivity.',
         );
       }
       emit({ t: 'network_status', v: 'ok' });

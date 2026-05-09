@@ -95,12 +95,14 @@ describe('ClaudeAiService (Anthropic SDK)', () => {
     };
 
     const out: any[] = [];
-    for await (const evt of service.streamGenerateText({ prompt: 'Search this' })) {
+    for await (const evt of service.streamGenerateText({
+      prompt: 'Search this',
+    })) {
       out.push(evt);
     }
 
     expect(out).toEqual([
-      { type: 'tool-call', toolName: 'webSearch' },
+      { type: 'tool-call', toolName: 'claude:web_search' },
       { type: 'text-delta', text: 'part-1 ' },
       { type: 'text-delta', text: 'part-2' },
     ]);

@@ -73,4 +73,20 @@ export class RedisService {
       );
     }
   }
+
+  async lpush(key: string, value: string): Promise<void> {
+    try {
+      await this.redis.lpush(key, value);
+    } catch (error) {
+      throw new Error(`Error pushing into Redis list: ${error.message}`);
+    }
+  }
+
+  async rpop(key: string): Promise<string | null> {
+    try {
+      return await this.redis.rpop(key);
+    } catch (error) {
+      throw new Error(`Error popping from Redis list: ${error.message}`);
+    }
+  }
 }

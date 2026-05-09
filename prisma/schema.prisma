@@ -1,8 +1,657 @@
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider        = "prisma-client"
+  output          = "../generated/prisma"
+  previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+model User {
+  id       String @id
+  username String @unique
+  password String
+}
+
+model admin_audit_logs {
+  id            String       @id
+  admin_user_id String?
+  action        String
+  resource      String?
+  resource_id   String?
+  details       Json?
+  ip_address    String?
+  user_agent    String?
+  created_at    DateTime     @default(now()) @db.Timestamp(6)
+  admin_users   admin_users? @relation(fields: [admin_user_id], references: [id], onUpdate: NoAction)
+
+  @@index([action], map: "idx_admin_audit_logs_action")
+  @@index([admin_user_id], map: "idx_admin_audit_logs_admin_user_id")
+  @@index([created_at], map: "idx_admin_audit_logs_created_at")
+}
+
+model admin_users {
+  id                    String             @id
+  email                 String             @unique
+  password_hash         String
+  first_name            String
+  last_name             String
+  is_super_admin        Boolean            @default(false)
+  status                String             @default("active")
+  role_id               String?
+  last_login_at         DateTime?          @db.Timestamp(6)
+  failed_login_attempts Int                @default(0)
+  locked_until          DateTime?          @db.Timestamp(6)
+  must_reset_password   Boolean            @default(false)
+  created_at            DateTime           @default(now()) @db.Timestamp(6)
+  updated_at            DateTime           @default(now()) @db.Timestamp(6)
+  admin_audit_logs      admin_audit_logs[]
+  roles                 roles?             @relation(fields: [role_id], references: [id], onUpdate: NoAction)
+}
+
+model blog_posts {
+  id               String      @id
+  title            String
+  slug             String      @unique(map: "UQ_blog_posts_slug")
+  excerpt          String
+  content          String
+  cover_image      String?
+  category         String
+  tags             String[]    @default([])
+  published        Boolean     @default(false)
+  author_name      String      @default("Admin")
+  created_at       DateTime    @default(now()) @db.Timestamp(6)
+  updated_at       DateTime    @default(now()) @db.Timestamp(6)
+  meta_title       String?     @db.VarChar(60)
+  meta_description String?     @db.VarChar(160)
+  og_image         String?
+  canonical_url    String?
+  seo_keywords     String[]    @default([])
+  structured_data  String?
+  checklist_id     String?
+  checklists       checklists? @relation(fields: [checklist_id], references: [id], onUpdate: NoAction)
+
+  @@index([category], map: "IDX_blog_posts_category")
+  @@index([published], map: "IDX_blog_posts_published")
+  @@index([slug], map: "IDX_blog_posts_slug")
+}
+
+model brands {
+  id          String     @id(map: "PK_brands")
+  name        String     @unique(map: "UQ_brands_name")
+  slug        String     @unique(map: "UQ_brands_slug")
+  logo_url    String?
+  description String?
+  website     String?
+  is_active   Boolean    @default(true)
+  created_at  DateTime   @default(now()) @db.Timestamp(6)
+  updated_at  DateTime   @default(now()) @db.Timestamp(6)
+  products    products[]
+
+  @@index([is_active], map: "IDX_brands_is_active")
+  @@index([slug], map: "IDX_brands_slug")
+}
+
+model cart_reminder_logs {
+  id           String    @id
+  user_id      String
+  cart_id      String
+  tier         Int
+  to_email     String
+  email_log_id String?
+  status       String    @default("sent")
+  sent_at      DateTime? @default(now()) @db.Timestamp(6)
+  carts        carts     @relation(fields: [cart_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users        users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([cart_id], map: "idx_cart_reminder_logs_cart_id")
+  @@index([cart_id, tier], map: "idx_cart_reminder_logs_cart_tier")
+  @@index([user_id], map: "idx_cart_reminder_logs_user_id")
+}
+
+model carts {
+  id                 String               @id
+  user_id            String               @unique
+  items              Json                 @default("[]")
+  created_at         DateTime             @default(now()) @db.Timestamp(6)
+  updated_at         DateTime             @default(now()) @db.Timestamp(6)
+  cart_reminder_logs cart_reminder_logs[]
+  users              users                @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_cart_user")
+
+  @@index([updated_at], map: "idx_carts_updated_at")
+  @@index([user_id], map: "idx_carts_user_id")
+}
+
+model categories {
+  id                 String     @id(map: "PK_categories")
+  name               String     @unique(map: "UQ_categories_name")
+  slug               String     @unique(map: "UQ_categories_slug")
+  description        String?
+  image_url          String?
+  sort_order         Int        @default(0)
+  is_active          Boolean    @default(true)
+  created_at         DateTime   @default(now()) @db.Timestamp(6)
+  updated_at         DateTime   @default(now()) @db.Timestamp(6)
+  meta_title         String?
+  meta_description   String?
+  body_text          String?
+  og_image           String?
+  lookup_keys        String[]
+  banner_image_url   String?
+  banner_headline    String?
+  banner_subheadline String?
+  banner_text_color  String?    @default("dark")
+  products           products[]
+
+  @@index([is_active], map: "IDX_categories_is_active")
+  @@index([slug], map: "IDX_categories_slug")
+}
+
+model checklist_contacts {
+  id           String     @id
+  checklist_id String
+  first_name   String
+  last_name    String
+  email        String
+  phone_number String?
+  created_at   DateTime?  @default(now()) @db.Timestamp(6)
+  checklists   checklists @relation(fields: [checklist_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([checklist_id], map: "IDX_checklist_contacts_checklist_id")
+}
+
+model checklists {
+  id                 String               @id
+  title              String
+  description        String?
+  pdf_url            String
+  created_at         DateTime?            @default(now()) @db.Timestamp(6)
+  updated_at         DateTime?            @default(now()) @db.Timestamp(6)
+  blog_posts         blog_posts[]
+  checklist_contacts checklist_contacts[]
+}
+
+model contact_notes {
+  id                  String              @id(map: "PK_contact_notes")
+  contact_id          String
+  content             String
+  author_name         String              @default("Admin")
+  created_at          DateTime            @default(now()) @db.Timestamp(6)
+  contact_submissions contact_submissions @relation(fields: [contact_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_contact_notes_contact")
+
+  @@index([contact_id], map: "IDX_contact_notes_contact_id")
+}
+
+model contact_submissions {
+  id              String          @id
+  first_name      String
+  last_name       String
+  company         String
+  email           String
+  phone           String?
+  role            String
+  device_interest String[]
+  quantity        String
+  timeline        String
+  message         String
+  created_at      DateTime        @default(now())
+  status          String?         @default("new") @db.VarChar(50)
+  contact_notes   contact_notes[]
+}
+
+model email_logs {
+  id         String    @id
+  type       String
+  to_email   String
+  subject    String
+  status     String
+  message_id String?
+  error      String?
+  related_id String?
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+}
+
+model google_analytics_connections {
+  id            String    @id
+  admin_user_id String
+  google_email  String    @default("")
+  access_token  String
+  refresh_token String
+  property_id   String?
+  property_name String?
+  token_expiry  DateTime? @db.Timestamp(6)
+  created_at    DateTime? @default(now()) @db.Timestamp(6)
+  updated_at    DateTime? @default(now()) @db.Timestamp(6)
+}
+
+model google_sheets_connections {
+  id               String    @id
+  admin_user_id    String
+  google_email     String
+  access_token     String
+  refresh_token    String
+  spreadsheet_id   String?
+  spreadsheet_name String?
+  token_expiry     DateTime? @db.Timestamp(6)
+  last_synced_at   DateTime? @db.Timestamp(6)
+  created_at       DateTime  @default(now()) @db.Timestamp(6)
+  updated_at       DateTime  @default(now()) @db.Timestamp(6)
+
+  @@index([admin_user_id], map: "idx_google_sheets_connections_admin_user_id")
+}
+
+model grades {
+  id               String             @id(map: "PK_grades")
+  name             String             @unique(map: "UQ_grades_name")
+  description      String?
+  sort_order       Int                @default(0)
+  is_active        Boolean            @default(true)
+  created_at       DateTime           @default(now()) @db.Timestamp(6)
+  updated_at       DateTime           @default(now()) @db.Timestamp(6)
+  slug             String             @unique(map: "grades_slug_unique")
+  code             String             @unique(map: "grades_code_unique")
+  product_variants product_variants[]
+
+  @@index([is_active], map: "IDX_grades_is_active")
+}
+
+model import_jobs {
+  id                String    @id
+  status            String    @default("pending")
+  file_path         String?
+  original_filename String
+  category_id       String?
+  options           Json?
+  total_rows        Int?      @default(0)
+  processed_rows    Int?      @default(0)
+  products_created  Int?      @default(0)
+  products_updated  Int?      @default(0)
+  variants_created  Int?      @default(0)
+  brands_created    Int?      @default(0)
+  grades_created    Int?      @default(0)
+  errors            Json?
+  warnings          Json?
+  error_message     String?
+  created_at        DateTime? @default(now()) @db.Timestamp(6)
+  updated_at        DateTime? @default(now()) @db.Timestamp(6)
+  completed_at      DateTime? @db.Timestamp(6)
+  file_url          String?
+  file_public_id    String?
+  variants_updated  Int       @default(0)
+  rows_skipped      Int       @default(0)
+
+  @@index([status], map: "idx_import_jobs_status")
+}
+
+model migrations {
+  id        Int    @id(map: "PK_8c82d7f526340ab734260ea46be") @default(autoincrement())
+  timestamp BigInt
+  name      String @db.VarChar
+}
+
+model order_items {
+  id           String   @id
+  order_id     String
+  variant_id   String
+  product_id   String
+  product_name String
+  sku          String
+  color        String
+  storage      String
+  grade_code   String
+  grade_name   String
+  unit_price   Decimal  @db.Decimal(10, 2)
+  quantity     Int
+  line_total   Decimal  @db.Decimal(10, 2)
+  image_url    String?
+  created_at   DateTime @default(now()) @db.Timestamp(6)
+  orders       orders   @relation(fields: [order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([order_id], map: "idx_order_items_order_id")
+}
+
+model orders {
+  id                         String        @id
+  order_number               String        @unique
+  status                     String        @default("pending")
+  company_name               String
+  contact_name               String
+  email                      String
+  phone                      String?
+  shipping_address_line1     String
+  shipping_address_line2     String?
+  shipping_city              String
+  shipping_state             String
+  shipping_zip               String
+  shipping_country           String        @default("US")
+  billing_address_line1      String?
+  billing_address_line2      String?
+  billing_city               String?
+  billing_state              String?
+  billing_zip                String?
+  billing_country            String?
+  subtotal                   Decimal       @db.Decimal(10, 2)
+  tax                        Decimal       @default(0) @db.Decimal(10, 2)
+  shipping                   Decimal       @default(0) @db.Decimal(10, 2)
+  total                      Decimal       @db.Decimal(10, 2)
+  stripe_checkout_session_id String?
+  stripe_payment_intent_id   String?
+  stripe_customer_id         String?
+  notes                      String?
+  created_at                 DateTime      @default(now()) @db.Timestamp(6)
+  updated_at                 DateTime      @default(now()) @db.Timestamp(6)
+  shipping_carrier           String?
+  shipping_service           String?
+  tracking_number            String?
+  shipping_label_url         String?
+  easypost_shipment_id       String?
+  easypost_tracker_id        String?
+  shipping_status            String?       @default("pending")
+  estimated_delivery_date    String?
+  user_id                    String?
+  order_items                order_items[]
+  users                      users?        @relation(fields: [user_id], references: [id], onUpdate: NoAction, map: "FK_orders_user_id")
+
+  @@index([user_id], map: "IDX_orders_user_id")
+  @@index([created_at], map: "idx_orders_created_at")
+  @@index([easypost_shipment_id], map: "idx_orders_easypost_shipment")
+  @@index([email], map: "idx_orders_email")
+  @@index([order_number], map: "idx_orders_order_number")
+  @@index([shipping_status], map: "idx_orders_shipping_status")
+  @@index([status], map: "idx_orders_status")
+  @@index([stripe_checkout_session_id], map: "idx_orders_stripe_session")
+  @@index([tracking_number], map: "idx_orders_tracking_number")
+}
+
+model otp_verifications {
+  id            String    @id
+  email         String
+  code_hash     String
+  purpose       String
+  expires_at    DateTime  @db.Timestamptz(6)
+  consumed_at   DateTime? @db.Timestamptz(6)
+  attempt_count Int?      @default(0)
+  ip_address    String?
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@index([email], map: "IDX_otp_verifications_email")
+}
+
+model permissions {
+  id               String             @id
+  resource         String
+  action           String
+  description      String?
+  created_at       DateTime           @default(now()) @db.Timestamp(6)
+  role_permissions role_permissions[]
+
+  @@unique([resource, action])
+}
+
+model product_asin_links {
+  id                      String            @id
+  product_id              String
+  variant_id              String?
+  asin                    String            @unique
+  amazon_price            Decimal?          @db.Decimal(10, 2)
+  amazon_url              String?
+  amazon_price_updated_at DateTime?         @db.Timestamp(6)
+  created_at              DateTime          @default(now()) @db.Timestamp(6)
+  updated_at              DateTime          @default(now()) @db.Timestamp(6)
+  products                products          @relation(fields: [product_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_asin_link_product")
+  product_variants        product_variants? @relation(fields: [variant_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_asin_link_variant")
+
+  @@index([product_id], map: "idx_asin_links_product_id")
+  @@index([variant_id], map: "idx_asin_links_variant_id")
+}
+
+model product_images {
+  id         String   @id(map: "PK_product_images")
+  product_id String
+  url        String
+  alt_text   String?
+  is_primary Boolean  @default(false)
+  sort_order Int      @default(0)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  products   products @relation(fields: [product_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_product_images_product")
+
+  @@index([product_id], map: "IDX_product_images_product_id")
+}
+
+model product_variants {
+  id                 String               @id(map: "PK_product_variants")
+  sku                String               @unique(map: "UQ_product_variants_sku")
+  product_id         String
+  color              String
+  storage            String
+  grade_id           String
+  price              Decimal              @db.Decimal(10, 2)
+  stock_quantity     Int                  @default(0)
+  min_order_qty      Int                  @default(1)
+  is_active          Boolean              @default(true)
+  created_at         DateTime             @default(now()) @db.Timestamp(6)
+  updated_at         DateTime             @default(now()) @db.Timestamp(6)
+  image_url          String?
+  msrp               Decimal?             @default(0) @db.Decimal(10, 2)
+  connectivity       String?
+  cellular_network   String?
+  mpn                String?              @unique(map: "IDX_product_variants_mpn")
+  specs              Json?                @default("{}")
+  product_asin_links product_asin_links[]
+  grades             grades               @relation(fields: [grade_id], references: [id], onUpdate: NoAction, map: "FK_product_variants_grade")
+  products           products             @relation(fields: [product_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "FK_product_variants_product")
+
+  @@unique([product_id, color, storage, grade_id, connectivity], map: "UQ_product_variants_combo")
+  @@index([color], map: "IDX_product_variants_color")
+  @@index([grade_id], map: "IDX_product_variants_grade_id")
+  @@index([is_active], map: "IDX_product_variants_is_active")
+  @@index([price], map: "IDX_product_variants_price")
+  @@index([product_id], map: "IDX_product_variants_product_id")
+  @@index([storage], map: "IDX_product_variants_storage")
+}
+
+model products {
+  id                      String               @id(map: "PK_products")
+  name                    String
+  slug                    String               @unique(map: "UQ_products_slug")
+  description             String?
+  short_description       String?
+  image_url               String?
+  brand_id                String
+  category_id             String
+  is_active               Boolean              @default(true)
+  is_featured             Boolean              @default(false)
+  created_at              DateTime             @default(now()) @db.Timestamp(6)
+  updated_at              DateTime             @default(now()) @db.Timestamp(6)
+  model_number            String?
+  msrp                    Decimal?             @db.Decimal(10, 2)
+  release_date            DateTime?            @db.Date
+  dimensions              String?
+  weight                  Decimal?             @db.Decimal(8, 2)
+  weight_used             Decimal?             @db.Decimal(8, 2)
+  weight_new              Decimal?             @db.Decimal(8, 2)
+  available_grades        String[]             @default([])
+  available_colors        String[]             @default([])
+  available_storage       String[]             @default([])
+  carriers                String[]             @default([])
+  specs                   Json?
+  seo_keyword             String?
+  seo_description         String?
+  seo_title               String?
+  seo_schema              String?
+  seo_faq_schema          String?
+  asin                    String?
+  amazon_price            Decimal?             @db.Decimal(10, 2)
+  amazon_price_updated_at DateTime?            @db.Timestamp(6)
+  amazon_url              String?
+  product_asin_links      product_asin_links[]
+  product_images          product_images[]
+  product_variants        product_variants[]
+  brands                  brands               @relation(fields: [brand_id], references: [id], onUpdate: NoAction, map: "FK_products_brand")
+  categories              categories           @relation(fields: [category_id], references: [id], onUpdate: NoAction, map: "FK_products_category")
+
+  @@index([available_colors], map: "IDX_products_available_colors", type: Gin)
+  @@index([available_grades], map: "IDX_products_available_grades", type: Gin)
+  @@index([brand_id], map: "IDX_products_brand_id")
+  @@index([category_id], map: "IDX_products_category_id")
+  @@index([is_active], map: "IDX_products_is_active")
+  @@index([is_featured], map: "IDX_products_is_featured")
+  @@index([model_number], map: "IDX_products_model_number")
+  @@index([msrp], map: "IDX_products_msrp")
+  @@index([slug], map: "IDX_products_slug")
+  @@index([specs], map: "IDX_products_specs", type: Gin)
+}
+
+model role_permissions {
+  id            String      @id
+  role_id       String
+  permission_id String
+  created_at    DateTime    @default(now()) @db.Timestamp(6)
+  permissions   permissions @relation(fields: [permission_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  roles         roles       @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([role_id, permission_id])
+}
+
+model roles {
+  id               String             @id
+  name             String             @unique
+  description      String?
+  is_system        Boolean            @default(false)
+  created_at       DateTime           @default(now()) @db.Timestamp(6)
+  updated_at       DateTime           @default(now()) @db.Timestamp(6)
+  admin_users      admin_users[]
+  role_permissions role_permissions[]
+}
+
+model sessions {
+  sid    String   @id @db.VarChar(255)
+  sess   Json
+  expire DateTime @db.Timestamp(6)
+
+  @@index([expire], map: "IDX_session_expire")
+}
+
+model users {
+  id                             String               @id(map: "PK_users")
+  email                          String?              @unique(map: "UQ_users_email")
+  first_name                     String?
+  last_name                      String?
+  profile_image_url              String?
+  business_name                  String?
+  phone                          String?
+  default_shipping_address_line1 String?
+  default_shipping_address_line2 String?
+  default_shipping_city          String?
+  default_shipping_state         String?
+  default_shipping_zip           String?
+  default_shipping_country       String?
+  created_at                     DateTime             @default(now()) @db.Timestamp(6)
+  updated_at                     DateTime             @default(now()) @db.Timestamp(6)
+  email_verified                 Boolean?             @default(false)
+  default_shipping_name          String?
+  google_id                      String?              @unique
+  job_title                      String?
+  business_size                  String?
+  industry                       String?
+  referral_source                String?
+  profile_completed              Boolean?             @default(false)
+  business_address_line1         String?
+  business_address_line2         String?
+  business_city                  String?
+  business_state                 String?
+  business_zip                   String?
+  business_country               String?
+  cart_reminder_logs             cart_reminder_logs[]
+  carts                          carts?
+  orders                         orders[]
+
+  @@index([google_id], map: "IDX_users_google_id")
+}
+
+model enrichment_jobs {
+  id                String              @id
+  entity            String
+  record_id         String
+  field             String
+  status            String              @default("pending")
+  priority          Int                 @default(5)
+  attempt_count     Int                 @default(0)
+  max_attempts      Int                 @default(5)
+  next_attempt_at   DateTime?           @db.Timestamp(6)
+  last_error        String?
+  created_at        DateTime            @default(now()) @db.Timestamp(6)
+  updated_at        DateTime            @default(now()) @db.Timestamp(6)
+  completed_at      DateTime?           @db.Timestamp(6)
+  confidence_scores confidence_scores[]
+  enrichment_logs   enrichment_logs[]
+  source_tracking   source_tracking[]
+
+  @@index([status], map: "idx_enrichment_jobs_status")
+  @@index([next_attempt_at], map: "idx_enrichment_jobs_next_attempt_at")
+  @@index([entity, record_id], map: "idx_enrichment_jobs_entity_record")
+  @@index([created_at], map: "idx_enrichment_jobs_created_at")
+}
+
+model enrichment_logs {
+  id                String          @id
+  enrichment_job_id String
+  level             String          @default("info")
+  event             String
+  message           String
+  metadata          Json?
+  created_at        DateTime        @default(now()) @db.Timestamp(6)
+  enrichment_jobs   enrichment_jobs @relation(fields: [enrichment_job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([enrichment_job_id], map: "idx_enrichment_logs_job_id")
+  @@index([event], map: "idx_enrichment_logs_event")
+  @@index([created_at], map: "idx_enrichment_logs_created_at")
+}
+
+model source_tracking {
+  id                String          @id
+  enrichment_job_id String
+  entity            String
+  record_id         String
+  field             String
+  source_domain     String
+  source_url        String
+  signal_type       String?
+  extraction_status String          @default("captured")
+  extracted_value   String?
+  created_at        DateTime        @default(now()) @db.Timestamp(6)
+  enrichment_jobs   enrichment_jobs @relation(fields: [enrichment_job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([enrichment_job_id], map: "idx_source_tracking_job_id")
+  @@index([entity, record_id, field], map: "idx_source_tracking_entity_record_field")
+  @@index([source_domain], map: "idx_source_tracking_domain")
+}
+
+model confidence_scores {
+  id                String          @id
+  enrichment_job_id String
+  entity            String
+  record_id         String
+  field             String
+  score             Decimal         @db.Decimal(5, 4)
+  level             String
+  decision          String
+  reasons           Json?
+  created_at        DateTime        @default(now()) @db.Timestamp(6)
+  enrichment_jobs   enrichment_jobs @relation(fields: [enrichment_job_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([enrichment_job_id], map: "idx_confidence_scores_job_id")
+  @@index([entity, record_id, field], map: "idx_confidence_scores_entity_record_field")
+  @@index([score], map: "idx_confidence_scores_score")
+}
+
+model ChatMessage {
+  id          String   @id
+  phoneNumber String
+  role        String
+  content     String
+  createdAt   DateTime @default(now())
+
+  @@index([phoneNumber, createdAt])
 }
