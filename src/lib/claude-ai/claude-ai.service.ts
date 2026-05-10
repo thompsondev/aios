@@ -107,7 +107,13 @@ function isTransientClaudeNetworkError(error: unknown): boolean {
   }
 
   const msg = (e.message || '').toLowerCase();
-  return msg.includes('socket hang up') || msg.includes('network error');
+  return (
+    msg.includes('socket hang up') ||
+    msg.includes('network error') ||
+    msg.includes('request timed out') ||
+    msg.includes('connect timeout') ||
+    (msg.includes('timeout') && msg.includes('fetch'))
+  );
 }
 
 /** Anthropic returned 400 ? org may not have server tools enabled in Console. */
