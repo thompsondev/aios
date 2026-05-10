@@ -2,16 +2,22 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { EnrichmentContextService } from './enrichment.context.service';
 import { EnrichmentJobQueueService } from './enrichment.job-queue.service';
 import { EnrichmentPlannerService } from './enrichment.planner.service';
+import { parseEnvBool } from './enrichment.constants';
 import { EnrichmentScannerService } from './enrichment.scanner.service';
 import { isTransientDatabaseError } from './enrichment.db-errors';
 
 @Injectable()
 export class EnrichmentSchedulerService implements OnModuleInit {
   private readonly logger = new Logger(EnrichmentSchedulerService.name);
+  /** Off by default: no periodic scan/enqueue unless explicitly enabled. */
+  private readonly intervalEnabled = parseEnvBool(
+    'ENRICHMENT_SCHEDULER_ENABLED',
+    false,
+  );
   private readonly intervalMs = Number(process.env.ENRICHMENT_INTERVAL_MS ?? 5 * 60 * 1000);
   private readonly scanLimit = Number(process.env.ENRICHMENT_SCAN_LIMIT ?? 50);
   private running = false;
-  private enabled = true;
+  private enabled = false;
   private lastStats: Record<string, unknown> = {
     candidates: 0,
     planned: 0,
@@ -27,6 +33,13 @@ export class EnrichmentSchedulerService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
+    if (!this.intervalEnabled) {
+      this.enabled = false;
+      this.logger.log(
+        '[enrichment-scheduler] Background scheduler disabled (default). Set ENRICHMENT_SCHEDULER_ENABLED=true for periodic scan/enqueue.',
+      );
+      return;
+    }
     void this.bootstrapState().catch((err) => {
       const msg = String((err as Error)?.message ?? err);
       if (isTransientDatabaseError(err)) {
@@ -97,7 +110,7 @@ export class EnrichmentSchedulerService implements OnModuleInit {
   private async bootstrapState(): Promise<void> {
     try {
       const ctx = await this.context.getContext();
-      this.enabled = ctx.schedulerEnabled ?? true;
+      this.enabled = ctx.schedulerEnabled ?? false;
       if (this.enabled) {
         await this.runCycle();
       }

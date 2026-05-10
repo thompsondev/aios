@@ -1,7 +1,7 @@
 {
-  "name": "aios",
+  "name": "depotai",
   "version": "0.0.1",
-  "description": "",
+  "description": "DepotAi — NestJS API for product research, catalog enrichment, and AI chat (Claude).",
   "author": "",
   "private": true,
   "license": "MIT",

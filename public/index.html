@@ -3,7 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AIOS – Stream</title>
+    <meta
+      name="description"
+      content="DepotAi — product research, catalog enrichment, and AI assistant."
+    />
+    <title>DepotAi – Stream</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -1473,7 +1477,7 @@
     <header class="header">
       <div class="brand">
         <div class="brand-name">
-          <span class="brand-name-main">HEY<em>SCRAPPER</em></span>
+          <span class="brand-name-main">Depot<em>Ai</em></span>
           <span
             class="brand-name-sub"
             id="brand-author"
@@ -1624,7 +1628,8 @@
       // ── Conversation history (in-memory for the current session) ───
       var conversationHistory = [];
       var HISTORY_LIMIT = 20;
-      const CONV_STORE_KEY = 'aios-conversations-v1';
+      const LEGACY_CONV_STORE_KEY = 'aios-conversations-v1';
+      const CONV_STORE_KEY = 'depotai-conversations-v1';
       var conversations = [];
       var activeConversationId = null;
 
@@ -1678,8 +1683,20 @@
       const ACCEPTED_DOCS = new Set(['application/pdf','text/plain','text/csv','text/markdown','text/html','application/json','application/xml','text/xml']);
 
       // ── Theme ──────────────────────────────────────
-      const savedTheme = localStorage.getItem('aios-theme') || 'dark';
+      const THEME_KEY = 'depotai-theme';
+      const LEGACY_THEME_KEY = 'aios-theme';
+      var savedTheme =
+        localStorage.getItem(THEME_KEY) ||
+        localStorage.getItem(LEGACY_THEME_KEY) ||
+        'dark';
       document.documentElement.setAttribute('data-theme', savedTheme);
+      if (
+        localStorage.getItem(LEGACY_THEME_KEY) &&
+        !localStorage.getItem(THEME_KEY)
+      ) {
+        localStorage.setItem(THEME_KEY, savedTheme);
+        localStorage.removeItem(LEGACY_THEME_KEY);
+      }
 
       themeToggle.addEventListener('click', function () {
         const next =
@@ -1687,7 +1704,7 @@
             ? 'light'
             : 'dark';
         document.documentElement.setAttribute('data-theme', next);
-        localStorage.setItem('aios-theme', next);
+        localStorage.setItem(THEME_KEY, next);
       });
 
       loadConversations();
@@ -1763,7 +1780,14 @@
 
       function loadConversations() {
         try {
-          const raw = localStorage.getItem(CONV_STORE_KEY);
+          var raw = localStorage.getItem(CONV_STORE_KEY);
+          if (!raw && localStorage.getItem(LEGACY_CONV_STORE_KEY)) {
+            raw = localStorage.getItem(LEGACY_CONV_STORE_KEY);
+            if (raw) {
+              localStorage.setItem(CONV_STORE_KEY, raw);
+              localStorage.removeItem(LEGACY_CONV_STORE_KEY);
+            }
+          }
           if (!raw) return;
           const parsed = JSON.parse(raw);
           conversations = Array.isArray(parsed.conversations) ? parsed.conversations : [];
@@ -1839,7 +1863,7 @@
             row.className = 'msg msg-ai';
             const badge = document.createElement('span');
             badge.className = 'msg-badge';
-            badge.textContent = '● AIOS';
+            badge.textContent = '● DepotAi';
             const textEl = document.createElement('div');
             textEl.className = 'msg-text';
             textEl.innerHTML = sanitizeMarkdownHtml(marked.parse(msg.content || ''));
@@ -2007,7 +2031,7 @@
 
         const badge = document.createElement('span');
         badge.className = 'msg-badge';
-        badge.textContent = '\u25CF AIOS';
+        badge.textContent = '\u25CF DepotAi';
         row.appendChild(badge);
 
         const thinkingEl = document.createElement('div');

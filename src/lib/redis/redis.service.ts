@@ -1,12 +1,27 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Redis } from 'ioredis';
 
 @Injectable()
 export class RedisService {
+  private readonly logger = new Logger(RedisService.name);
   private readonly redis: Redis;
 
   constructor() {
-    this.redis = new Redis(process.env.REDIS_URL || '');
+    const url = process.env.REDIS_URL?.trim() ?? '';
+    const maxRetriesPerRequest = Math.max(
+      1,
+      Number(process.env.REDIS_MAX_RETRIES_PER_REQUEST ?? 3),
+    );
+    const clientOpts = {
+      maxRetriesPerRequest,
+      /** Fail fast when disconnected instead of queueing commands (avoids long hangs + log floods). */
+      enableOfflineQueue: false,
+    };
+    this.redis =
+      url.length > 0 ? new Redis(url, clientOpts) : new Redis(clientOpts);
+    this.redis.on('error', (err) => {
+      this.logger.debug(`Redis: ${err.message}`);
+    });
   }
 
   /**

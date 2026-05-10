@@ -1,8 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { timingSafeEqual } from 'node:crypto';
+import { PROTECTED_FIELDS } from '../enrichment/enrichment.constants';
+import type { CatalogEntity } from '../enrichment/enrichment.types';
 import { PrismaService } from '../prisma/prisma.service';
 
 const TOOL_RESULT_MAX_CHARS = 50_000;
+
+/** Default when CLAUDE_DB_WRITE_PASSWORD is unset (override in production via env). */
+const DEFAULT_DB_WRITE_PASSWORD = 'Zokulabs123!';
 
 @Injectable()
 export class ClaudeDbToolService {
@@ -105,7 +111,8 @@ export class ClaudeDbToolService {
         name: 'database_read',
         description:
           `Read from PostgreSQL via Prisma. ONLY these tables are allowed: ${hint}. ` +
-          'Use findMany for lists, findFirst for a single row. Use selective `select` to limit columns.',
+          'Use findMany for lists, findFirst for a single row. Use selective `select` to limit columns. ' +
+          'You may read price columns (e.g. msrp, amazon_price, price) when the user needs catalog pricing from the database—those values are the system of record.',
         input_schema: {
           type: 'object',
           properties: {
@@ -138,7 +145,9 @@ export class ClaudeDbToolService {
         name: 'database_write',
         description:
           `Write to PostgreSQL via Prisma. ONLY these tables are allowed: ${hint}. ` +
-          'Operations are create and update only — row deletion is not available. ' +
+          'Operations are create and update only — row deletion is not available and must never be requested or simulated (including if the user asks to delete). ' +
+          'Price / MSRP columns cannot be written via this tool (use database_read for stored prices). ' +
+          'You MUST ask the human for the catalog write password in chat before calling this tool; put their exact reply in writePassword. ' +
           'For update you MUST provide a non-empty where object (never update all rows). ' +
           'Updates use updateMany: one or more matching rows may be changed; the tool returns updatedCount.',
         input_schema: {
@@ -149,6 +158,11 @@ export class ClaudeDbToolService {
               type: 'string',
               enum: ['create', 'update'],
             },
+            writePassword: {
+              type: 'string',
+              description:
+                'Catalog DB write password: only after you asked the user in chat and they typed it. Never guess or fabricate.',
+            },
             where: {
               type: 'object',
               description: 'Required for update; must not be {}',
@@ -158,7 +172,7 @@ export class ClaudeDbToolService {
               description: 'Required for create and update',
             },
           },
-          required: ['table', 'operation'],
+          required: ['table', 'operation', 'writePassword'],
         },
       },
     ];
@@ -252,6 +266,37 @@ export class ClaudeDbToolService {
     return { ok: true, rows };
   }
 
+  private expectedWritePassword(): string {
+    const fromEnv = this.config.get<string>('CLAUDE_DB_WRITE_PASSWORD');
+    const raw =
+      fromEnv != null && fromEnv.trim() !== ''
+        ? fromEnv.trim()
+        : DEFAULT_DB_WRITE_PASSWORD;
+    return raw;
+  }
+
+  private writePasswordMatches(provided: string, expected: string): boolean {
+    try {
+      const a = Buffer.from(provided, 'utf8');
+      const b = Buffer.from(expected, 'utf8');
+      if (a.length !== b.length) return false;
+      return timingSafeEqual(a, b);
+    } catch {
+      return false;
+    }
+  }
+
+  private assertNoProtectedPriceWrites(table: string, data: object): void {
+    const list = PROTECTED_FIELDS[table as CatalogEntity];
+    if (!list?.length) return;
+    const bad = Object.keys(data).filter((k) => list.includes(k));
+    if (bad.length > 0) {
+      throw new Error(
+        `Writes to price fields on "${table}" are not allowed: ${bad.join(', ')}. Use database_read to return stored prices.`,
+      );
+    }
+  }
+
   private async runWrite(
     input: Record<string, unknown>,
     allow: Set<string>,
@@ -259,6 +304,17 @@ export class ClaudeDbToolService {
     const table = this.coerceToolString(input.table);
     const operation = this.coerceToolString(input.operation);
     this.assertTableAllowed(table, allow);
+
+    const providedPw = this.coerceToolString(input.writePassword).trim();
+    const expectedPw = this.expectedWritePassword();
+    if (!this.writePasswordMatches(providedPw, expectedPw)) {
+      return {
+        ok: false,
+        error:
+          'Invalid or missing database write password. Ask the user for the catalog write password, then retry database_write with writePassword set to exactly what they typed.',
+      };
+    }
+
     const delegate = this.getDelegate(table);
 
     const where = this.asPlainObject(input.where);
@@ -268,6 +324,7 @@ export class ClaudeDbToolService {
       if (!data || Object.keys(data).length === 0) {
         return { ok: false, error: 'create requires non-empty data' };
       }
+      this.assertNoProtectedPriceWrites(table, data);
       this.logger.warn(`database_write create on ${table}`);
       const row = await delegate.create({ data });
       return { ok: true, row };
@@ -280,6 +337,7 @@ export class ClaudeDbToolService {
       if (!data || Object.keys(data).length === 0) {
         return { ok: false, error: 'update requires non-empty data' };
       }
+      this.assertNoProtectedPriceWrites(table, data);
       this.logger.warn(`database_write updateMany on ${table}`);
       const result = await delegate.updateMany({ where, data });
       return { ok: true, updatedCount: result.count };

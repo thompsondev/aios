@@ -1,13 +1,13 @@
-# AIOS
+# DepotAi
 
-A NestJS API backend that exposes an AI-powered assistant through a REST API. It uses the Vercel AI SDK (v6) with a configurable gateway, optional pre-response web search (Valyu), and PostgreSQL (Prisma). The system prompt and branding are customizable, so you can adapt it for your own product or use it as a starter for an AI-backed API.
+A NestJS API backend for **DepotAi**: product research, catalog enrichment, and an AI assistant powered primarily by **Anthropic Claude** (with optional native web search/fetch when enabled). Data lives in **PostgreSQL** via **Prisma**. Branding defaults to DepotAi; adjust env (`PLATFORM_NAME`, demo UI) as needed.
 
 ## Features
 
 - **AI chat endpoint** – `POST /v1/chat/prompt` returns a complete AI-generated text response
 - **Streaming endpoint** – `POST /v1/chat/prompt/stream` streams the AI response as SSE (`text/event-stream`); emits `searching` → `search_done` → `text` delta events → `done`
-- **Pre-response web search** – When `VALYU_API_KEY` is set, the server searches the web *before* calling the AI and injects the results as context; powered by [Valyu](https://www.npmjs.com/package/@valyu/ai-sdk)
-- **Configurable AI** – Uses [Vercel AI SDK v6](https://sdk.vercel.ai/) with `@ai-sdk/gateway`; model and API key via env
+- **Optional web context** – Claude server tools (web search / web fetch) when enabled in Anthropic Console and env; legacy Valyu pre-search may be documented in older branches
+- **Configurable AI** – `CLAUDE_API_KEY`, `CLAUDE_MODEL`, and related env vars; see `.env.example`
 - **Optional API key auth** – Set `API_KEY` in env to require an `x-api-key` header on all routes; omit for open access. When open access: only domains listed in `DOMAIN_CHAT` (one or more, comma-separated) have a per-day-per-IP limit (default **5**, or `PROMPTS_PER_DAY_CHAT`); all other domains are **unlimited**. Omit `DOMAIN_CHAT` for unlimited prompts everywhere.
 - **WhatsApp bot** – Connect a WhatsApp Cloud API app to receive and reply to messages; per-user conversation history stored in Redis; read receipts and typing indicators
 - **Slack bot** – Connect a Slack app to receive and reply to `app_mention` and direct messages; per-user conversation history stored in Redis; request signature verification; event deduplication
@@ -21,8 +21,7 @@ A NestJS API backend that exposes an AI-powered assistant through a REST API. It
 
 - [NestJS](https://nestjs.com/) 11
 - [Prisma](https://www.prisma.io/) 7 (PostgreSQL)
-- [Vercel AI SDK v6](https://sdk.vercel.ai/) with `@ai-sdk/gateway`
-- [Valyu](https://www.npmjs.com/package/@valyu/ai-sdk) (`@valyu/ai-sdk`) for pre-response web search
+- [Anthropic Claude](https://www.anthropic.com/) (Messages API via `@anthropic-ai/sdk`)
 - [Scalar](https://scalar.com/) + [NestJS Swagger](https://docs.nestjs.com/openapi/introduction) (OpenAPI)
 - TypeScript, class-validator, class-transformer, Winston
 
@@ -31,7 +30,7 @@ A NestJS API backend that exposes an AI-powered assistant through a REST API. It
 - **Node.js** 18+
 - **pnpm** (recommended) or npm/yarn
 - **PostgreSQL** (local or remote)
-- **AI gateway API key** (e.g. from your AI provider / gateway)
+- **Anthropic API key** (`CLAUDE_API_KEY`) for Claude
 
 ## Project setup
 
@@ -49,10 +48,12 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DATABASE_URL` | Yes | PostgreSQL connection string (e.g. `postgresql://user:pass@localhost:5432/aios`) |
-| `AI_GATEWAY_API_KEY` | Yes | API key for the AI gateway used by the SDK |
-| `AI_MODEL` | No | Model identifier (default: `openai/gpt-4o-mini`) |
-| `VALYU_API_KEY` | No | Valyu API key for web search (get free key at [platform.valyu.ai](https://platform.valyu.ai)); omit to disable web search |
+| `DATABASE_URL` | Yes | PostgreSQL connection string (e.g. `postgresql://user:pass@localhost:5432/depotai`) |
+| `CLAUDE_API_KEY` | Yes* | Anthropic API key for chat and tools (*required for AI routes unless you only use non-AI endpoints) |
+| `CLAUDE_MODEL` | No | Claude model id (default: `claude-sonnet-4-6`) |
+| `CLAUDE_DB_TOOLS_ENABLED` | No | Set `true` with `CLAUDE_DB_TABLE_ALLOWLIST` to expose read/write DB tools to the model |
+| `CLAUDE_DB_TABLE_ALLOWLIST` | No | Comma-separated Prisma model names allowed for DB tools (e.g. `products,product_variants`) |
+| `CLAUDE_DB_WRITE_PASSWORD` | No | Secret the user must type in chat before `database_write` runs. If unset, a built-in default applies (override in production) |
 | `PORT` | No | Server port (default: `3000`) |
 | `API_KEY` | No | If set, all routes require an `x-api-key: <value>` header. Omit or leave blank for open access. |
 | `DOMAIN_CHAT` | No | When `API_KEY` is not set: comma-separated list of hostnames that get a per-day-per-IP limit (request `Host` must match one). Only these domains are limited; all other domains are **unlimited**. Omit for unlimited everywhere. |
@@ -141,7 +142,7 @@ Each event is a JSON object on a `data:` line.
 
 | Event | Fields | Description |
 |-------|--------|-------------|
-| `searching` | `query` | Web search started (only emitted when `VALYU_API_KEY` is set) |
+| `searching` | — | Web search phase started (Claude native tools or client tool UI) |
 | `search_done` | — | Web search complete; AI generation begins |
 | `text` | `v` | Incremental text delta from the model |
 | `reasoning` | `v` | Incremental reasoning delta (extended-thinking models) |

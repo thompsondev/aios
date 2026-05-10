@@ -84,7 +84,7 @@ export function createMediaTool(
       let response: Response;
       try {
         response = await fetch(url, {
-          headers: { 'User-Agent': 'AIOS-MediaTool/1.0' },
+          headers: { 'User-Agent': 'DepotAi-MediaTool/1.0' },
           signal: AbortSignal.timeout(30_000),
         });
       } catch (err: any) {

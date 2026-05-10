@@ -9,7 +9,14 @@ import { WhatsappService } from '../../lib/whatsapp/wa.service';
 import { RedisService } from '../../lib/redis/redis.service';
 import { SlackService } from '../../lib/slack/slack.service';
 
-const HISTORY_LIMIT = 20;
+/** Prior turns sent to the model (Slack/WhatsApp/stream when client sends history). Capped to limit tokens. */
+function chatHistoryMessageLimit(): number {
+  const n = Number(process.env.CHAT_HISTORY_LIMIT);
+  if (!Number.isFinite(n) || n < 1) return 20;
+  return Math.min(200, Math.floor(n));
+}
+
+const HISTORY_LIMIT = chatHistoryMessageLimit();
 const HISTORY_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 const SLACK_EVENT_DEDUP_TTL = 300; // 5 minutes
 

@@ -12,15 +12,54 @@ import { EnrichmentConfidenceEngineService } from './enrichment.confidence-engin
 import { EnrichmentDbUpdateService } from './enrichment.db-update.service';
 import { EnrichmentStaleDetectorService } from './enrichment.stale-detector.service';
 import { EnrichmentConflictResolverService } from './enrichment.conflict-resolver.service';
+import { parseEnvBool } from './enrichment.constants';
 import { isTransientDatabaseError } from './enrichment.db-errors';
 import type { EnrichmentQueuePayload } from './enrichment.job-queue.service';
+
+/** Safe string for DB logging of extracted values (avoids String(object) → "[object Object]"). */
+function extractedValueForDb(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'bigint') return value.toString();
+  return JSON.stringify(value);
+}
+
+function isRedisUnavailableError(e: unknown): boolean {
+  const msg = String(e instanceof Error ? e.message : e).toLowerCase();
+  return (
+    msg.includes('max retries per request') ||
+    msg.includes('etimedout') ||
+    msg.includes('econnrefused') ||
+    msg.includes('enotfound') ||
+    msg.includes('connection is closed') ||
+    msg.includes('error popping from redis list') ||
+    msg.includes('error pushing into redis list') ||
+    msg.includes('error saving data to redis') ||
+    msg.includes('error getting data from redis') ||
+    msg.includes('error deleting data from redis')
+  );
+}
 
 @Injectable()
 export class EnrichmentWorkerService implements OnModuleInit {
   private readonly logger = new Logger(EnrichmentWorkerService.name);
+  /** Off by default: no Redis queue polling unless explicitly enabled. */
+  private readonly workerEnabled = parseEnvBool(
+    'ENRICHMENT_WORKER_ENABLED',
+    false,
+  );
   private readonly pollMs = 4000;
+  /** Only one dequeue pipeline at a time (setInterval does not await async work). */
+  private pollInFlight = false;
   /** Pause dequeue when DB is flapping (Neon cold start / network). */
   private workerBackoffUntil = 0;
+  /** Pause dequeue when Redis is down (avoid overlapping failing polls + log spam). */
+  private redisBackoffUntil = 0;
+  private readonly redisBackoffMs = Number(
+    process.env.ENRICHMENT_WORKER_REDIS_BACKOFF_MS ?? 30_000,
+  );
   private consecutiveTransientDb = 0;
   private readonly backoffMaxMs = Number(
     process.env.ENRICHMENT_WORKER_BACKOFF_MAX_MS ?? 120_000,
@@ -41,12 +80,24 @@ export class EnrichmentWorkerService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
+    if (!this.workerEnabled) {
+      this.logger.log(
+        '[enrichment-worker] Background worker disabled (default). Set ENRICHMENT_WORKER_ENABLED=true to poll the enrichment queue.',
+      );
+      return;
+    }
     setInterval(() => {
-      void this.processNext().catch((err) => {
-        this.logger.error(
-          `[enrichment-worker] unhandled processNext: ${String((err as Error)?.message ?? err)}`,
-        );
-      });
+      if (this.pollInFlight) return;
+      this.pollInFlight = true;
+      void this.processNext()
+        .catch((err) => {
+          this.logger.error(
+            `[enrichment-worker] unhandled processNext: ${String((err as Error)?.message ?? err)}`,
+          );
+        })
+        .finally(() => {
+          this.pollInFlight = false;
+        });
     }, this.pollMs);
   }
 
@@ -54,11 +105,21 @@ export class EnrichmentWorkerService implements OnModuleInit {
     if (Date.now() < this.workerBackoffUntil) {
       return;
     }
+    if (Date.now() < this.redisBackoffUntil) {
+      return;
+    }
 
     let job: EnrichmentQueuePayload | null = null;
     try {
       job = await this.queue.popNextJob();
     } catch (e: unknown) {
+      if (isRedisUnavailableError(e)) {
+        this.redisBackoffUntil = Date.now() + this.redisBackoffMs;
+        this.logger.warn(
+          `[enrichment-worker] Redis unavailable; pausing queue polls for ${this.redisBackoffMs}ms (${String((e as Error)?.message ?? e).slice(0, 160)})`,
+        );
+        return;
+      }
       this.logger.warn(
         `[enrichment-worker] queue pop failed: ${String((e as Error)?.message ?? e)}`,
       );
@@ -134,7 +195,7 @@ export class EnrichmentWorkerService implements OnModuleInit {
           INSERT INTO "source_tracking"
             ("id","enrichment_job_id","entity","record_id","field","source_domain","source_url","signal_type","extraction_status","extracted_value","created_at")
           VALUES
-            (${sourceTrackingId}, ${job.jobId}, ${job.entity}, ${job.recordId}, ${job.field}, ${source.domain}, ${source.url}, 'search', ${validation.ok ? 'validated' : 'rejected'}, ${resolved.value == null ? null : String(resolved.value)}, NOW())
+            (${sourceTrackingId}, ${job.jobId}, ${job.entity}, ${job.recordId}, ${job.field}, ${source.domain}, ${source.url}, 'search', ${validation.ok ? 'validated' : 'rejected'}, ${extractedValueForDb(resolved.value)}, NOW())
         `;
       }
 
@@ -204,10 +265,9 @@ export class EnrichmentWorkerService implements OnModuleInit {
     entity: CatalogEntity,
     recordId: string,
   ): Promise<Record<string, unknown> | null> {
-    const rows = await this.prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
-      `SELECT * FROM "${entity}" WHERE id = $1 LIMIT 1`,
-      recordId,
-    );
+    const rows = await this.prisma.$queryRawUnsafe<
+      Array<Record<string, unknown>>
+    >(`SELECT * FROM "${entity}" WHERE id = $1 LIMIT 1`, recordId);
     return rows[0] ?? null;
   }
 }

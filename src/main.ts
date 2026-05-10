@@ -17,7 +17,8 @@ async function bootstrap() {
   const port = configService.get<number>('PORT', 3000);
   const productionUrl = configService.get<string>('PRODUCTION_URL');
   const developmentUrl = configService.get<string>('DEVELOPMENT_URL');
-  const platform = configService.get<string>('PLATFORM_NAME');
+  const platform =
+    configService.get<string>('PLATFORM_NAME')?.trim() || 'DepotAi';
   const logger = app.get(CustomLoggerService);
   const apiKeyEnabled = !!configService.get<string>('API_KEY');
   const domainChatRaw = configService.get<string>('DOMAIN_CHAT');

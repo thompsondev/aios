@@ -2,6 +2,13 @@ import type { CatalogEntity } from './enrichment.types';
 
 export const ENRICHMENT_CONTEXT_KEY = 'enrichment:catalog-core:context:v1';
 
+/** true / 1 / yes (case-insensitive); unset or empty → defaultValue. */
+export function parseEnvBool(name: string, defaultValue: boolean): boolean {
+  const v = process.env[name]?.trim().toLowerCase();
+  if (v === undefined || v === '') return defaultValue;
+  return v === 'true' || v === '1' || v === 'yes';
+}
+
 export const TRUSTED_DOMAINS: string[] = [
   'apple.com',
   'samsung.com',
@@ -20,7 +27,7 @@ export const PROTECTED_FIELDS: Record<CatalogEntity, string[]> = {
   categories: [],
 };
 
-// Only these fields are eligible for autonomous enrichment.
+// Only these fields are eligible for the enrichment pipeline (chat-driven or worker).
 export const ENRICHABLE_FIELDS: Record<CatalogEntity, string[]> = {
   products: [
     'description',
